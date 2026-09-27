@@ -1,6 +1,6 @@
 {
   "title" : "Outpost War",
-  "type" : "ServerContent",
+  "type" : "tool",
   "tags" : [ "fun", "build" ],
-  "description" : "Мой аддон с аванпостами и битвами NPC."
+  "ignore" : [ "*.md", "*.txt", "*.psd", ".git*" ]
 }
