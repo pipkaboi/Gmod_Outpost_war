@@ -14,6 +14,10 @@ OW.CVars = {
         "1 = NPC аванпостов не трогают игроков"),
     tint           = CreateConVar("outpost_war_tint", "1", CV_FLAGS,
         "1 = красить NPC в цвет команды"),
+    open_doors     = CreateConVar("outpost_war_open_doors", "1", CV_FLAGS,
+        "1 = NPC открывают двери на пути"),
+    unlock_doors   = CreateConVar("outpost_war_unlock_doors", "0", CV_FLAGS,
+        "1 = NPC открывают даже запертые двери"),
     debug          = CreateConVar("outpost_war_debug", "0", bit.bor(FCVAR_REPLICATED, FCVAR_NOTIFY),
         "1 = рисовать линии к целям NPC (нужно developer 1)"),
 }

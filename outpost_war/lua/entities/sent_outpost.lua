@@ -16,11 +16,19 @@ function ENT:SetupDataTables()
     self:NetworkVar("Int", 2, "MaxNPCs")
     self:NetworkVar("Int", 3, "SquadSize")
     self:NetworkVar("Int", 4, "Garrison")
+    self:NetworkVar("Int", 5, "SpawnLimit")    -- сколько NPC аванпост может выпустить всего (0 = без лимита)
+    self:NetworkVar("Int", 6, "SpawnedTotal")  -- сколько уже выпустил
     self:NetworkVar("Float", 0, "CapProgress")
     self:NetworkVar("Float", 1, "CapRadius")
     self:NetworkVar("Float", 2, "SpawnDelay")
     self:NetworkVar("String", 0, "NPCClass")
     self:NetworkVar("String", 1, "NPCWeapon")
+end
+
+-- Аванпост исчерпал лимит NPC
+function ENT:IsDepleted()
+    local limit = self:GetSpawnLimit()
+    return limit > 0 and self:GetSpawnedTotal() >= limit
 end
 
 if SERVER then
@@ -29,6 +37,7 @@ if SERVER then
     local DEFAULTS = {
         team = 1, npc = "npc_combine_s", weapon = "default",
         max_npcs = 10, spawn_delay = 15, squad_size = 4, garrison = 2, radius = 300,
+        spawn_limit = 0,
     }
 
     function ENT:Initialize()
@@ -54,6 +63,8 @@ if SERVER then
         self:SetSquadSize(math.Clamp(math.floor(get("squad_size")), 1, 20))
         self:SetGarrison(math.Clamp(math.floor(get("garrison")), 0, 20))
         self:SetCapRadius(math.Clamp(get("radius"), 100, 2000))
+        self:SetSpawnLimit(math.Clamp(math.floor(get("spawn_limit")), 0, 10000))
+        self:SetSpawnedTotal(0)   -- новые настройки = счётчик заново
         self:UpdateColor()
     end
 
@@ -96,9 +107,10 @@ if SERVER then
 
     function ENT:SpawnOneNPC()
         local team = self:GetOPTeam()
-        if team == 0 then return end
+        if team == 0 or self:IsDepleted() then return end
 
         local key = self:GetNPCClass()
+        if self.OW_BadClass == key then return end
         local data = list.Get("NPC")[key]
         local class = data and data.Class or key
 
@@ -124,7 +136,10 @@ if SERVER then
         if data and data.SpawnFlags then flags = bit.bor(flags, data.SpawnFlags) end
         if data and data.TotalSpawnFlags then flags = data.TotalSpawnFlags end
         npc:SetKeyValue("spawnflags", flags)
-        npc:SetKeyValue("squadname", "ow_home_" .. self:EntIndex())
+        -- Внутренний отряд ИИ движка вмещает максимум 16 NPC ("Squad ... is too big"),
+        -- поэтому делим NPC аванпоста на группы по 8
+        self.OW_SquadCounter = (self.OW_SquadCounter or 0) + 1
+        npc:SetKeyValue("squadname", "ow_home_" .. self:EntIndex() .. "_" .. math.floor(self.OW_SquadCounter / 8))
 
         -- Оружие
         local wep = self:GetNPCWeapon()
@@ -139,6 +154,19 @@ if SERVER then
         npc:Spawn()
         npc:Activate()
 
+        -- Некоторые сущности из списка NPC на самом деле не NPC (некстботы и т.п.):
+        -- ими нельзя управлять через ИИ HL2, поэтому такие не поддерживаются.
+        if not IsValid(npc) then return end
+        if not npc:IsNPC() then
+            npc:Remove()
+            if self.OW_BadClass ~= key then
+                self.OW_BadClass = key
+                PrintMessage(HUD_PRINTTALK, "[Аванпосты] '" .. key .. "' не является NPC HL2 "
+                    .. "(скорее всего некстбот) и не поддерживается. Выберите другого NPC.")
+            end
+            return
+        end
+
         if data and data.Health then
             npc:SetHealth(data.Health)
             npc:SetMaxHealth(data.Health)
@@ -151,6 +179,12 @@ if SERVER then
         if IsValid(self.OW_Owner) then cleanup.Add(self.OW_Owner, "npcs", npc) end
 
         OW.Register(npc, self)
+
+        self:SetSpawnedTotal(self:GetSpawnedTotal() + 1)
+        if self:IsDepleted() then
+            PrintMessage(HUD_PRINTTALK, string.format("[Аванпосты] Аванпост (%s) опустел: выпущено %d NPC",
+                OW.TeamName(team), self:GetSpawnedTotal()))
+        end
         return npc
     end
 
@@ -210,7 +244,13 @@ if SERVER then
         -- 2) Из резерва собираем отряд и отправляем в атаку
         local sqSize = self:GetSquadSize()
         local full = total >= self:GetMaxNPCs()
-        if not threatened and #reserves > 0 and (#reserves >= sqSize or full) then
+        -- Волна закончила спавниться (все в резерве дольше 3 сек) -> отправляем сразу,
+        -- даже если бойцов меньше размера отряда
+        local waveDone = #reserves > 0
+        for _, n in ipairs(reserves) do
+            if CurTime() - (n.OW_ReserveSince or 0) < 3 then waveDone = false break end
+        end
+        if not threatened and #reserves > 0 and (#reserves >= sqSize or full or waveDone) then
             local target = OW.FindTarget(team, self:GetPos(), self)
             if target then
                 local members = {}
@@ -220,9 +260,12 @@ if SERVER then
         end
 
         -- 3) Спавн волнами (по размеру отряда)
-        if not full and CurTime() >= (self.OW_NextWave or 0) then
+        if not full and not self:IsDepleted() and CurTime() >= (self.OW_NextWave or 0) then
             self.OW_NextWave = CurTime() + self:GetSpawnDelay()
             local n = math.min(sqSize, self:GetMaxNPCs() - total)
+            if self:GetSpawnLimit() > 0 then
+                n = math.min(n, self:GetSpawnLimit() - self:GetSpawnedTotal())
+            end
             for i = 1, n do
                 timer.Simple((i - 1) * 0.4, function()
                     if IsValid(self) and self:GetOPTeam() == team then self:SpawnOneNPC() end
@@ -325,6 +368,9 @@ if CLIENT then
 
         local team = self:GetOPTeam()
         local col = OW.TeamColor(team)
+        if self:IsDepleted() then
+            col = Color(col.r * 0.45 + 60, col.g * 0.45 + 60, col.b * 0.45 + 60)
+        end
         local r = self:GetCapRadius()
 
         -- Круг зоны захвата
@@ -338,6 +384,19 @@ if CLIENT then
         cam.Start3D2D(pos + Vector(0, 0, 75), ang, 0.12)
             draw.SimpleTextOutlined(OW.TeamName(team), "OutpostWar_Big", 0, 0, col,
                 TEXT_ALIGN_CENTER, TEXT_ALIGN_BOTTOM, 2, color_black)
+
+            -- Счётчик выпущенных NPC
+            local limit = self:GetSpawnLimit()
+            if team ~= 0 and limit > 0 then
+                local txt, tcol
+                if self:IsDepleted() then
+                    txt, tcol = "ОПУСТЕЛ", Color(160, 160, 160)
+                else
+                    txt, tcol = string.format("NPC: %d / %d", self:GetSpawnedTotal(), limit), color_white
+                end
+                draw.SimpleTextOutlined(txt, "OutpostWar_Small", 0, -52, tcol,
+                    TEXT_ALIGN_CENTER, TEXT_ALIGN_BOTTOM, 2, color_black)
+            end
 
             local prog = self:GetCapProgress()
             if prog > 0 then

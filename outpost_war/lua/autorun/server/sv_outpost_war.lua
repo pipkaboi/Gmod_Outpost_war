@@ -1,5 +1,7 @@
 -- lua/autorun/server/sv_outpost_war.lua
 -- "Мозг" мода: реестр NPC, отношения между командами, отряды, охрана.
+-- Логика движения — как в версии из коммита на GitHub (движок сам строит маршрут по
+-- AI-нодам карты; если не смог — NPC идёт "шагами"). Поверх неё: VJ Base, двери, журнал.
 
 OutpostWar = OutpostWar or {}
 local OW = OutpostWar
@@ -29,10 +31,17 @@ function OW.GetOutposts()
 end
 
 -- Ближайший НЕ свой аванпост (вражеский или нейтральный)
+OW.Unreachable = OW.Unreachable or {}
+
+local function IsUnreachable(team, op)
+    local t = OW.Unreachable[team] and OW.Unreachable[team][op]
+    return t and CurTime() - t < 60
+end
+
 function OW.FindTarget(team, pos, exclude)
     local best, bestD
     for _, op in ipairs(OW.GetOutposts()) do
-        if op ~= exclude and op:GetOPTeam() ~= team then
+        if op ~= exclude and op:GetOPTeam() ~= team and not IsUnreachable(team, op) then
             local d = op:GetPos():DistToSqr(pos)
             if not bestD or d < bestD then best, bestD = op, d end
         end
@@ -82,11 +91,51 @@ local function MoveSched(npc)
     return npc.OW_UseWalk and SCHED_FORCED_GO or SCHED_FORCED_GO_RUN
 end
 
+-- NPC из VJ Base: свой ИИ на Lua, двигать их нужно функциями VJ Base
+local function IsVJ(npc)
+    return npc.IsVJBaseSNPC == true
+end
+
 local function IsMoving(npc)
+    if IsVJ(npc) then return npc.IsMoving and npc:IsMoving() or false end
     return npc:IsCurrentSchedule(SCHED_FORCED_GO_RUN) or npc:IsCurrentSchedule(SCHED_FORCED_GO)
 end
 
-local STEP = 450
+local function IssueMove(npc, target)
+    npc:SetLastPosition(target)
+    if IsVJ(npc) then
+        local task = npc.OW_UseWalk and "TASK_WALK_PATH" or "TASK_RUN_PATH"
+        if npc.SCHEDULE_GOTO_POSITION then npc:SCHEDULE_GOTO_POSITION(task) return end
+        if npc.VJ_TASK_GOTO_LASTPOS then npc:VJ_TASK_GOTO_LASTPOS(task) return end
+    end
+    npc:SetSchedule(MoveSched(npc))
+end
+
+local function StopMove(npc)
+    if IsVJ(npc) then
+        if npc.StopMoving then npc:StopMoving() end
+        return
+    end
+    if npc.ClearSchedule then npc:ClearSchedule() else npc:SetSchedule(SCHED_IDLE_STAND) end
+end
+
+-- Журнал: outpost_war_debug 2 -> файл garrysmod/data/outpost_war_log.txt
+local function Log(npc, msg)
+    if cv_debug:GetInt() < 2 then return end
+    local role = npc.OW_Squad and ("отряд " .. npc.OW_Squad.id .. (npc.OW_Squad.members[1] == npc and " лидер" or ""))
+        or (npc.OW_Role or "?")
+    local line = string.format("[%.1f] #%d %s (%s) act=%s sched=%s: %s\n", CurTime(), npc:EntIndex(),
+        npc:GetClass(), role, tostring(npc:GetActivity()), tostring(npc:GetCurrentSchedule()), msg)
+    file.Append("outpost_war_log.txt", line)
+end
+OW.Log = Log
+
+concommand.Add("outpost_war_log_clear", function(ply)
+    if IsValid(ply) and not ply:IsAdmin() then return end
+    file.Write("outpost_war_log.txt", "")
+end)
+
+local STEP = 220   -- по журналу: дальше ~200 юнитов движок часто не строит путь
 
 local function FloorAt(p)
     local tr = util.TraceLine({
@@ -129,8 +178,9 @@ local function StepPoint(npc, goal, fails)
     return best or goal
 end
 
--- Отправить NPC к точке pos. Вызывается каждый тик; сам решает, надо ли перевыдавать приказ.
-function OW.MoveTo(npc, pos, tolerance)
+-- Прямой приказ: маршрут строит движок; если не смог — идём "шагами".
+-- Вызывается каждый тик; сам решает, надо ли перевыдавать приказ.
+local function DirectMove(npc, pos, tolerance)
     tolerance = tolerance or 100
     local now = CurTime()
     local mypos = npc:GetPos()
@@ -160,6 +210,8 @@ function OW.MoveTo(npc, pos, tolerance)
     end
 
     if failed then
+        Log(npc, string.format("провал #%d: running=%s, до точки %.0f", (npc.OW_Fail or 0) + 1,
+            tostring(running), npc.OW_Target and mypos:Distance(npc.OW_Target) or -1))
         npc.OW_Fail = (npc.OW_Fail or 0) + 1
         npc.OW_StepUntil = now + 15                 -- 15 сек идём шагами
         if npc.OW_Fail % 4 == 0 then npc.OW_UseWalk = not npc.OW_UseWalk end
@@ -171,15 +223,70 @@ function OW.MoveTo(npc, pos, tolerance)
 
     npc.OW_Goal, npc.OW_Target = pos, target
     npc.OW_LastPos, npc.OW_LastMove = mypos, now
-    npc:SetLastPosition(target)
-    npc:SetSchedule(MoveSched(npc))
+    IssueMove(npc, target)
+    Log(npc, string.format("приказ: до точки %.0f%s, running до этого=%s", mypos:Distance(target),
+        npc.OW_Stepping and " (шаг)" or "", tostring(running)))
+end
+
+-- Отправить NPC к точке pos. Если далеко и на карте есть навмеш — идём по маршруту
+-- по навмешу (sv_outpost_path.lua, белые линии в отладке), иначе — прямым приказом.
+local PATH_MIN_DIST = 450
+
+function OW.MoveTo(npc, pos, tolerance)
+    local mypos = npc:GetPos()
+    local P = OW.Path
+
+    if not (P and P.Available()) or mypos:DistToSqr(pos) < PATH_MIN_DIST * PATH_MIN_DIST then
+        npc.OW_Path, npc.OW_NoRoute = nil, nil
+        return DirectMove(npc, pos, tolerance)
+    end
+
+    local now = CurTime()
+    local path = npc.OW_Path
+    local need = not path or path.failed or path.goal:DistToSqr(pos) > 300 * 300
+        or (path.wps[path.idx] and mypos:DistToSqr(path.wps[path.idx]) > 900 * 900)
+
+    if need and now >= (npc.OW_NextRepath or 0) then
+        local status, res = P.Request(mypos, pos)
+        if status == "pending" then
+            npc.OW_NextRepath = now + 0.2
+        elseif status == "ok" and #res > 0 then
+            path = { goal = pos, wps = res, idx = 1 }
+            npc.OW_Path, npc.OW_NoRoute, npc.OW_Fail = path, nil, 0
+            npc.OW_NextRepath = now + 2
+        else
+            path = nil
+            npc.OW_Path, npc.OW_NoRoute, npc.OW_NoRouteReason = nil, now, res
+            npc.OW_NextRepath = now + 5
+        end
+    end
+
+    if not path then
+        if npc.OW_NoRoute and not npc.OW_Squad then return DirectMove(npc, pos, tolerance) end
+        OW.Stop(npc)
+        return
+    end
+
+    while path.idx < #path.wps do
+        local wp = path.wps[path.idx]
+        local d2 = mypos:DistToSqr(wp)
+        -- следующую точку выдаём заранее (за 120 юнитов), чтобы NPC не останавливался
+        if d2 < 120 * 120 or (d2 < 220 * 220 and P.ClearWalk(mypos, path.wps[path.idx + 1])) then
+            path.idx = path.idx + 1
+        else
+            break
+        end
+    end
+
+    local wp = path.idx == #path.wps and pos or path.wps[path.idx]
+    DirectMove(npc, wp, 30)
+
+    if (npc.OW_Fail or 0) >= 2 then path.failed = true end
 end
 
 -- Прервать наш приказ движения (чтобы NPC мог стрелять / стоять)
 function OW.Stop(npc)
-    if IsMoving(npc) then
-        if npc.ClearSchedule then npc:ClearSchedule() else npc:SetSchedule(SCHED_IDLE_STAND) end
-    end
+    if IsMoving(npc) then StopMove(npc) end
     npc.OW_Goal, npc.OW_Target = nil, nil
 end
 
@@ -193,13 +300,24 @@ function OW.DebugDraw()
                 local sq = npc.OW_Squad
                 label = "отряд " .. sq.id .. " " .. (sq.state or "") .. (sq.members[1] == npc and " [лидер]" or "")
             end
+            if IsVJ(npc) then label = "[VJ] " .. label end
             if npc.OW_Stepping then label = label .. " (шаги)" end
             if (npc.OW_Fail or 0) > 0 then label = label .. " fail:" .. npc.OW_Fail end
             if OW.IsFighting(npc) then label = label .. " БОЙ" end
-            debugoverlay.Text(npc:EyePos() + Vector(0, 0, 12), label, 1.05, false)
+            if npc.OW_Path then
+                label = label .. " (маршрут " .. npc.OW_Path.idx .. "/" .. #npc.OW_Path.wps .. ")"
+                local prev = npc:GetPos()
+                for i = npc.OW_Path.idx, #npc.OW_Path.wps do
+                    local w = npc.OW_Path.wps[i] + Vector(0, 0, 8)
+                    debugoverlay.Line(prev, w, 0.55, Color(255, 255, 255), true)
+                    prev = w
+                end
+            end
+            if npc.OW_NoRoute then label = label .. " НЕТ МАРШРУТА: " .. tostring(npc.OW_NoRouteReason) end
+            debugoverlay.Text(npc:EyePos() + Vector(0, 0, 12), label, 0.55, false)
             if npc.OW_Target then
-                debugoverlay.Line(npc:EyePos(), npc.OW_Target, 1.05, col, true)
-                debugoverlay.Cross(npc.OW_Target, 12, 1.05, col, true)
+                debugoverlay.Line(npc:EyePos(), npc.OW_Target, 0.55, col, true)
+                debugoverlay.Cross(npc.OW_Target, 12, 0.55, col, true)
             end
         end
     end
@@ -225,7 +343,7 @@ end
 ---------------------------------------------------------------------------
 function OW.SetupRelationships(npc)
     for other in pairs(OW.NPCs) do
-        if other ~= npc and IsValid(other) then
+        if other ~= npc and IsValid(other) and other:IsNPC() then
             local disp = (other.OW_Team == npc.OW_Team) and D_LI or D_HT
             npc:AddEntityRelationship(other, disp, 99)
             other:AddEntityRelationship(npc, disp, 99)
@@ -239,9 +357,16 @@ function OW.SetupRelationships(npc)
 end
 
 function OW.Register(npc, outpost)
+    if not (IsValid(npc) and npc:IsNPC()) then return end
+    if IsVJ(npc) then
+        -- VJ Base определяет своих/чужих по собственным классам
+        npc.VJ_NPC_Class = { "CLASS_OUTPOST_TEAM_" .. outpost:GetOPTeam() }
+        npc.DisableWandering = true
+    end
     npc.OW_Team = outpost:GetOPTeam()
     npc.OW_Home = outpost
     npc.OW_Role = "reserve"
+    npc.OW_ReserveSince = CurTime()
     npc.OW_SpawnClass = outpost:GetNPCClass()
     npc.OW_SpawnWeapon = outpost:GetNPCWeapon()
     OW.SetupRelationships(npc)
@@ -281,10 +406,10 @@ function OW.DisbandSquad(sq, home)
         if IsValid(npc) then
             npc.OW_Squad = nil
             npc.OW_Role = "reserve"
+            npc.OW_ReserveSince = CurTime()
             npc.OW_Home = home
             npc.OW_AssaultGoal = nil
             npc.OW_GuardPos = nil
-            if npc.SetSquad and IsValid(home) then npc:SetSquad("ow_home_" .. home:EntIndex()) end
         end
     end
     OW.Squads[sq.id] = nil
@@ -330,6 +455,16 @@ function OW.SquadTick(sq)
 
     if sq.state == "march" and leader:GetPos():DistToSqr(tpos) < (r + 250) ^ 2 then
         sq.state = "assault"
+    end
+
+    -- Маршрута к цели по навмешу нет -> цель недостижима на минуту, выбираем другую
+    if sq.state == "march" and leader.OW_NoRoute then
+        OW.Unreachable[sq.team] = OW.Unreachable[sq.team] or {}
+        OW.Unreachable[sq.team][t] = CurTime()
+        for _, m in ipairs(sq.members) do m.OW_NoRoute, m.OW_Path = nil, nil end
+        sq.target, sq.goal = OW.FindTarget(sq.team, leader:GetPos()), nil
+        if not sq.target then OW.DisbandSquad(sq, OW.FindHome(sq.team, leader:GetPos())) end
+        return
     end
 
     if sq.state == "march" then
@@ -414,6 +549,50 @@ function OW.GuardTick(npc)
 end
 
 ---------------------------------------------------------------------------
+-- Двери: NPC под нашим приказом сами двери не открывают — открываем за них
+---------------------------------------------------------------------------
+local DOOR_CLASSES = { prop_door_rotating = true, func_door = true, func_door_rotating = true }
+
+local function DoorIsClosed(door)
+    if door:GetClass() == "prop_door_rotating" then
+        local st = door:GetInternalVariable("m_eDoorState")
+        return st == 0 or st == 3
+    end
+    local st = door:GetInternalVariable("m_toggle_state")
+    return st == 1 or st == 3
+end
+
+function OW.DoorTick()
+    if not (OW.CVars.open_doors and OW.CVars.open_doors:GetBool()) then return end
+    local now = CurTime()
+    for npc in pairs(OW.NPCs) do
+        if IsValid(npc) and npc.OW_Target then
+            local pos = npc:GetPos()
+            local dir = npc.OW_Target - pos
+            dir.z = 0
+            if dir:LengthSqr() > 1 then
+                dir:Normalize()
+                for _, door in ipairs(ents.FindInSphere(pos + dir * 50 + Vector(0, 0, 40), 70)) do
+                    if DOOR_CLASSES[door:GetClass()] and now >= (door.OW_NextOpen or 0) and DoorIsClosed(door) then
+                        door.OW_NextOpen = now + 2
+                        local locked = door:GetInternalVariable("m_bLocked")
+                        if not locked or OW.CVars.unlock_doors:GetBool() then
+                            if locked then door:Fire("Unlock") end
+                            if door:GetClass() == "prop_door_rotating" then
+                                if npc:GetName() == "" then npc:SetName("ow_npc_" .. npc:EntIndex()) end
+                                door:Fire("OpenAwayFrom", npc:GetName())
+                            else
+                                door:Fire("Open")
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+---------------------------------------------------------------------------
 -- Главный цикл
 ---------------------------------------------------------------------------
 function OW.Tick()
@@ -431,10 +610,11 @@ function OW.Tick()
         if not npc.OW_Squad then OW.GuardTick(npc) end
     end
 
+    OW.DoorTick()
     OW.DebugDraw()
 end
 
-timer.Create("OutpostWar_Tick", 1, 0, function()
+timer.Create("OutpostWar_Tick", 0.5, 0, function()
     local ok, err = pcall(OW.Tick)
     if not ok then ErrorNoHalt("[OutpostWar] " .. tostring(err) .. "\n") end
 end)
@@ -446,3 +626,5 @@ concommand.Add("outpost_war_clear_npcs", function(ply)
     end
     OW.NPCs, OW.Squads = {}, {}
 end)
+
+MsgN("[Outpost War] sv_outpost_war.lua загружен — движение v12 (отрезки по 200)")

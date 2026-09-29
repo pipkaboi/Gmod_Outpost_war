@@ -14,6 +14,7 @@ TOOL.ClientConVar = {
     squad_size  = "4",
     garrison    = "2",
     radius      = "300",
+    spawn_limit = "0",
 }
 
 TOOL.Information = {
@@ -49,6 +50,7 @@ function TOOL:GetSettings()
         squad_size  = self:GetClientNumber("squad_size", 4),
         garrison    = self:GetClientNumber("garrison", 2),
         radius      = self:GetClientNumber("radius", 300),
+        spawn_limit = self:GetClientNumber("spawn_limit", 0),
     }
 end
 
@@ -72,6 +74,7 @@ function TOOL:LeftClick(tr)
         undo.SetPlayer(ply)
     undo.Finish()
     cleanup.Add(ply, "outposts", outpost)
+
 
     return true
 end
@@ -101,6 +104,7 @@ function TOOL.BuildCPanel(pnl)
 
     -- Выбор NPC из списка спавн-меню (включая NPC из других аддонов)
     local npcBox = pnl:ComboBox("Тип NPC")
+    npcBox:SetSortItems(false)
     local current = GetConVarString("outpost_tool_npc")
     local npcs = {}
     for key, data in pairs(list.Get("NPC")) do
@@ -111,15 +115,48 @@ function TOOL.BuildCPanel(pnl)
     for _, v in ipairs(npcs) do
         npcBox:AddChoice(v.label, v.key, v.key == current)
     end
-    npcBox.OnSelect = function(_, _, _, key) RunConsoleCommand("outpost_tool_npc", key) end
 
-    -- Оружие
+    -- Оружие. Первый пункт показывает, чем NPC вооружён по умолчанию
     local wepBox = pnl:ComboBox("Оружие")
-    local curWep = GetConVarString("outpost_tool_weapon")
-    wepBox:AddChoice("По умолчанию для NPC", "default", curWep == "default")
-    wepBox:AddChoice("Без оружия", "none", curWep == "none")
-    for _, w in pairs(list.Get("NPCUsableWeapons")) do
-        wepBox:AddChoice(language.GetPhrase(w.title or w.class), w.class, w.class == curWep)
+    wepBox:SetSortItems(false)
+
+    local function WeaponTitle(cls)
+        for _, w in pairs(list.Get("NPCUsableWeapons")) do
+            if w.class == cls then return language.GetPhrase(w.title or cls) end
+        end
+        return cls
+    end
+
+    local function FillWeapons(npcKey)
+        local curWep = GetConVarString("outpost_tool_weapon")
+        wepBox:Clear()
+
+        local data = list.Get("NPC")[npcKey]
+        local def = "По умолчанию"
+        if data and data.Weapons and #data.Weapons > 0 then
+            local names = {}
+            for _, cls in ipairs(data.Weapons) do table.insert(names, WeaponTitle(cls)) end
+            def = def .. ": " .. table.concat(names, " / ")
+        else
+            def = def .. " (своё оружие NPC)"
+        end
+        wepBox:AddChoice(def, "default", curWep == "default" or curWep == "")
+        wepBox:AddChoice("Без оружия", "none", curWep == "none")
+
+        local weps = {}
+        for _, w in pairs(list.Get("NPCUsableWeapons")) do
+            table.insert(weps, { cls = w.class, label = language.GetPhrase(w.title or w.class) })
+        end
+        table.SortByMember(weps, "label", true)
+        for _, w in ipairs(weps) do
+            wepBox:AddChoice(w.label, w.cls, w.cls == curWep)
+        end
+    end
+    FillWeapons(current)
+
+    npcBox.OnSelect = function(_, _, _, key)
+        RunConsoleCommand("outpost_tool_npc", key)
+        FillWeapons(key)
     end
     wepBox.OnSelect = function(_, _, _, cls) RunConsoleCommand("outpost_tool_weapon", cls) end
 
@@ -128,6 +165,9 @@ function TOOL.BuildCPanel(pnl)
     pnl:NumSlider("Гарнизон (охрана)", "outpost_tool_garrison", 0, 10, 0)
     pnl:NumSlider("Пауза между волнами (сек)", "outpost_tool_spawn_delay", 2, 120, 0)
     pnl:NumSlider("Радиус зоны захвата", "outpost_tool_radius", 100, 1000, 0)
+    pnl:NumSlider("Лимит NPC за всё время (0 = без лимита)", "outpost_tool_spawn_limit", 0, 200, 0)
+    pnl:ControlHelp("Когда аванпост выпустит столько NPC, он опустеет и больше никого не создаст. "
+        .. "R инструментом по аванпосту сбрасывает счётчик.")
 
     pnl:Help("Серверные настройки: вкладка Outpost War → Settings → Server Settings.")
 end
