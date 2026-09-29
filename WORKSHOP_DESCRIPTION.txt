@@ -1,0 +1,74 @@
+[h1]Outpost War[/h1]
+[b]EN:[/b] Place outposts for different teams and watch NPC squads fight for them. Outposts spawn NPCs in waves: a garrison guards the outpost, the rest form squads that follow real routes to capture the nearest enemy or neutral outpost. Captured outposts switch sides and spawn the captor's NPCs. Join the war yourself, lead a squad and capture points.
+
+[b]RU:[/b] Ставьте аванпосты разных команд и смотрите, как отряды NPC воюют за них. Аванпосты спавнят NPC волнами: гарнизон охраняет точку, остальные собираются в отряды и идут по настоящим маршрутам захватывать ближайший вражеский или нейтральный аванпост. Захваченный аванпост переходит к новой команде и спавнит её NPC. Вступайте в войну сами, ведите отряд и захватывайте точки.
+
+[h2]Features[/h2]
+[list]
+[*]Any NPC from the spawn menu (HL2 and addons), chosen or default weapon
+[*]Waves, garrison, squads with leaders (star above the leader)
+[*]Capture zone with progress bar, neutral outposts (team 0)
+[*]Teams 1–10, hostile to each other even with the same NPC class
+[*]Routes over the navmesh (around buildings and cliffs) + AI nodes
+[*]NPCs open doors and break glass in their way
+[*]Squads fight on their own and keep combat readiness after losing the enemy
+[*]Per-outpost total NPC limit ("depleted" outposts)
+[*]Players join teams, capture points, respawn at their outposts and lead a squad of free NPCs
+[*]HUD: team, squad size, captured / total outposts. English and Russian
+[/list]
+
+[h2]Возможности[/h2]
+[list]
+[*]Любые NPC из спавн-меню (HL2 и аддоны), выбранное оружие или по умолчанию
+[*]Волны, гарнизон, отряды с лидерами (звёздочка над лидером)
+[*]Зона захвата с прогрессом, нейтральные аванпосты (команда 0)
+[*]Команды 1–10 враждуют даже с одинаковым классом NPC
+[*]Маршруты по навмешу (в обход зданий и обрывов) + AI-ноды
+[*]NPC открывают двери и разбивают стёкла на пути
+[*]Отряды сами ведут бой и остаются в боевой готовности после потери врага
+[*]Лимит NPC на аванпост за всё время (аванпост «пустеет»)
+[*]Игроки вступают в команды, захватывают точки, появляются на своих аванпостах и ведут отряд из свободных NPC
+[*]На экране: команда, отряд, захвачено / всего точек. Русский и английский
+[/list]
+
+[h2]How to use / Как пользоваться[/h2]
+[olist]
+[*]Q → [b]Outpost War[/b] → [b]Outposts → Outpost Creator[/b]. [b]LMB[/b] place / поставить, [b]RMB[/b] remove / удалить, [b]R[/b] apply settings / применить настройки (resets NPC counter / сбрасывает счётчик).
+[*]Place outposts of 2+ teams (or a neutral one). / Поставьте аванпосты 2+ команд (или нейтральный).
+[*]Join the war / Вступить в войну: [b]Outpost War → Settings → Player[/b] → team → [b]Join team[/b].
+[/olist]
+
+[h2]Console commands / Консольные команды[/h2]
+[table]
+[tr][th]Command[/th][th]EN / RU[/th][/tr]
+[tr][td]outpost_war_join <team>[/td][td]Join team 1–10, 0 = leave / Вступить в команду 1–10, 0 = выйти[/td][/tr]
+[tr][td]outpost_war_squad_dismiss[/td][td]Dismiss your squad / Распустить свой отряд[/td][/tr]
+[tr][td]outpost_war_clear_npcs[/td][td](admin) Remove all outpost NPCs / Удалить всех NPC аванпостов[/td][/tr]
+[tr][td]outpost_war_path_reset[/td][td](admin) Clear route cache (after nav_generate) / Сбросить кэш маршрутов[/td][/tr]
+[tr][td]outpost_war_log_clear[/td][td](admin) Clear debug log / Очистить журнал отладки[/td][/tr]
+[/table]
+
+[h2]Server ConVars / Серверные настройки[/h2]
+Also in / Также в [b]Outpost War → Settings → Server Settings[/b].
+[table]
+[tr][th]ConVar[/th][th]Def.[/th][th]EN / RU[/th][/tr]
+[tr][td]outpost_war_capture_time[/td][td]15[/td][td]Seconds for one NPC to capture / Секунд на захват одним NPC[/td][/tr]
+[tr][td]outpost_war_engage_dist[/td][td]800[/td][td]Distance to a visible enemy to engage / Дистанция до видимого врага для вступления в бой[/td][/tr]
+[tr][td]outpost_war_combat_linger[/td][td]8[/td][td]Seconds in combat after losing the enemy / Секунд боевой готовности после потери врага[/td][/tr]
+[tr][td]outpost_war_ignore_players[/td][td]0[/td][td]NPCs ignore players not in a team / NPC не трогают игроков вне команд[/td][/tr]
+[tr][td]outpost_war_tint[/td][td]1[/td][td]Tint NPCs with team color / Красить NPC в цвет команды[/td][/tr]
+[tr][td]outpost_war_open_doors[/td][td]1[/td][td]NPCs open doors / NPC открывают двери[/td][/tr]
+[tr][td]outpost_war_unlock_doors[/td][td]0[/td][td]...even locked ones / ...даже запертые[/td][/tr]
+[tr][td]outpost_war_break_glass[/td][td]1[/td][td]NPCs break glass in their way / NPC разбивают стёкла на пути[/td][/tr]
+[tr][td]outpost_war_player_squad[/td][td]4[/td][td]Max NPCs in a player's squad / Макс. NPC в отряде игрока[/td][/tr]
+[tr][td]outpost_war_spawn_at_outpost[/td][td]1[/td][td]Respawn at your team's outpost / Появляться на аванпосте своей команды[/td][/tr]
+[tr][td]outpost_war_debug[/td][td]0[/td][td]1 = draw routes, 2 = + log to data/outpost_war_log.txt (developer 1) / 1 = маршруты, 2 = + журнал[/td][/tr]
+[/table]
+
+[h2]Notes / Примечания[/h2]
+[list]
+[*]NPCs need a navmesh to walk around buildings: [b]sv_cheats 1[/b] + [b]nav_generate[/b] if the map has none. AI nodes help too. / Для обхода зданий нужен навмеш: [b]sv_cheats 1[/b] + [b]nav_generate[/b], если его нет. AI-ноды тоже помогают.
+[*]Nextbots (DrGBase etc.) are not supported. / Некстботы (DrGBase и т.п.) не поддерживаются.
+[*]VJ Base NPCs work but may ignore the "ally of player" relation. / NPC из VJ Base работают, но могут игнорировать союзничество с игроком.
+[*]Outposts without navmesh nearby (roofs) can't be reached; squads pick another target. / До аванпостов без навмеша (крыши) не дойти — отряды выберут другую цель.
+[/list]

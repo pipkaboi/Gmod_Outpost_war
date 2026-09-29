@@ -67,7 +67,13 @@ hook.Add("HUDPaint", "OutpostWar_PlayerHUD", function()
     local t = ply:GetNWInt("OW_Team", 0)
     if t <= 0 then return end
     local OW = OutpostWar
-    local text = string.format(OW.L("hud"), OW.TeamName(t), ply:GetNWInt("OW_SquadCount", 0))
+    -- счёт точек: сколько всего и сколько у команды игрока
+    local total, mine = 0, 0
+    for _, op in ipairs(ents.FindByClass("sent_outpost")) do
+        total = total + 1
+        if op:GetOPTeam() == t then mine = mine + 1 end
+    end
+    local text = string.format(OW.L("hud"), OW.TeamName(t), ply:GetNWInt("OW_SquadCount", 0), mine, total)
     draw.SimpleTextOutlined(text, "OutpostWar_Small", ScrW() / 2, 12, OW.TeamColor(t),
         TEXT_ALIGN_CENTER, TEXT_ALIGN_TOP, 2, color_black)
 end)

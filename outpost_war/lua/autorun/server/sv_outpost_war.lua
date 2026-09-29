@@ -300,7 +300,8 @@ function OW.DebugDraw()
             local label = npc.OW_Role or "?"
             if npc.OW_Squad then
                 local sq = npc.OW_Squad
-                label = "отряд " .. sq.id .. " " .. (sq.state or "") .. (sq.members[1] == npc and " [лидер]" or "")
+                label = sq.player and ("отряд игрока " .. (IsValid(sq.player) and sq.player:Nick() or "?"))
+                    or ("отряд " .. sq.id .. " " .. (sq.state or "") .. (sq.members[1] == npc and " [лидер]" or ""))
             end
             if IsVJ(npc) then label = "[VJ] " .. label end
             if npc.OW_Stepping then label = label .. " (шаги)" end
@@ -334,9 +335,11 @@ local function FightingRaw(npc)
     local e = npc:GetEnemy()
     if not IsValid(e) then return false end
     if e.Health and e:Health() <= 0 then return false end
-    local range = OW.CVars.engage_dist and OW.CVars.engage_dist:GetFloat() or 1200
+    local range = OW.CVars.engage_dist and OW.CVars.engage_dist:GetFloat() or 800
     local d = npc:GetPos():DistToSqr(e:GetPos())
-    if d <= range * range and (d < 600 * 600 or npc:Visible(e)) then
+    -- в NPC недавно попали — отвечает огнём на любой дистанции
+    local hurt = npc.OW_HurtTime and CurTime() - npc.OW_HurtTime < 3
+    if (d <= range * range or hurt) and (d < 600 * 600 or npc:Visible(e)) then
         npc.OW_LastCombat = CurTime()
         return true
     end
@@ -364,14 +367,14 @@ end
 function OW.Engage(npc)
     local now = CurTime()
     local e = npc:GetEnemy()
-    if IsValid(e) and npc.OW_CombatSince and now - npc.OW_CombatSince > 12
-       and npc:GetPos():DistToSqr(e:GetPos()) > 500 * 500 then
+    if IsValid(e) and npc.OW_CombatSince and now - npc.OW_CombatSince > 5
+       and npc:GetPos():DistToSqr(e:GetPos()) > 600 * 600 then
         if not npc.OW_PushUntil and now >= (npc.OW_NextPush or 0) then
             local dir = e:GetPos() - npc:GetPos()
             dir.z = 0
             dir:Normalize()
-            npc.OW_PushTarget = FloorAt(npc:GetPos() + dir * 250) or (npc:GetPos() + dir * 250)
-            npc.OW_PushUntil, npc.OW_NextPush = now + 3, now + 10
+            npc.OW_PushTarget = FloorAt(npc:GetPos() + dir * 350) or (npc:GetPos() + dir * 350)
+            npc.OW_PushUntil, npc.OW_NextPush = now + 3.5, now + 6
             Log(npc, string.format("рывок к врагу (до него %.0f)", npc:GetPos():Distance(e:GetPos())))
         end
         if npc.OW_PushUntil and now < npc.OW_PushUntil then
@@ -419,6 +422,11 @@ function OW.Register(npc, outpost)
     OW.SetupRelationships(npc)
     OW.NPCs[npc] = true
 end
+
+-- Запоминаем, когда в NPC попали (см. FightingRaw)
+hook.Add("EntityTakeDamage", "OutpostWar_Hurt", function(ent, dmg)
+    if ent.OW_Team and OW.NPCs[ent] then ent.OW_HurtTime = CurTime() end
+end)
 
 hook.Add("PlayerInitialSpawn", "OutpostWar_IgnorePlayers", function(ply)
     for npc in pairs(OW.NPCs) do

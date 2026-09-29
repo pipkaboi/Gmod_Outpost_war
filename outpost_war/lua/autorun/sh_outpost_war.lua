@@ -20,7 +20,7 @@ OW.CVars = {
         "1 = NPCs open even locked doors"),
     break_glass    = CreateConVar("outpost_war_break_glass", "1", CV_FLAGS,
         "1 = NPCs break glass in their way"),
-    engage_dist    = CreateConVar("outpost_war_engage_dist", "1200", CV_FLAGS,
+    engage_dist    = CreateConVar("outpost_war_engage_dist", "800", CV_FLAGS,
         "Distance to a visible enemy at which NPCs stop marching and engage (units)"),
     player_squad   = CreateConVar("outpost_war_player_squad", "4", CV_FLAGS,
         "Max NPCs that join a player's squad (0 = none)"),
