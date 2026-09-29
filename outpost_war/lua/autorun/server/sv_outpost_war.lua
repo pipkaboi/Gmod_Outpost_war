@@ -196,8 +196,10 @@ local function DirectMove(npc, pos, tolerance)
             failed = true
         end
     elseif npc.OW_Target then
-        -- Приказ закончился, а до точки далеко -> маршрут не построился
-        if mypos:DistToSqr(npc.OW_Target) > 150 * 150 then
+        -- Приказ закончился, а до точки далеко -> маршрут не построился.
+        -- (tolerance > 150 — например, точка строя: подойти "примерно" достаточно)
+        local arrive = math.max(150, tolerance)
+        if mypos:DistToSqr(npc.OW_Target) > arrive * arrive then
             failed = true
         else
             npc.OW_Fail = 0
@@ -206,14 +208,14 @@ local function DirectMove(npc, pos, tolerance)
 
     if running and sameGoal and not failed then
         -- В режиме шагов выдаём следующий шаг, когда почти дошли до текущего
-        if not npc.OW_Stepping or mypos:DistToSqr(npc.OW_Target) > 150 * 150 then return end
+        if not npc.OW_Stepping or mypos:DistToSqr(npc.OW_Target) > 90 * 90 then return end
     end
 
     if failed then
         Log(npc, string.format("провал #%d: running=%s, до точки %.0f", (npc.OW_Fail or 0) + 1,
             tostring(running), npc.OW_Target and mypos:Distance(npc.OW_Target) or -1))
         npc.OW_Fail = (npc.OW_Fail or 0) + 1
-        npc.OW_StepUntil = now + 15                 -- 15 сек идём шагами
+        npc.OW_StepUntil = now + 6                  -- 6 сек идём шагами
         if npc.OW_Fail % 4 == 0 then npc.OW_UseWalk = not npc.OW_UseWalk end
     end
 
@@ -324,17 +326,60 @@ function OW.DebugDraw()
 end
 
 -- Видит ли NPC живого врага поблизости
-function OW.IsFighting(npc)
+-- Боевая готовность: после того как враг пропал из виду, NPC ещё столько секунд
+-- остаётся под управлением своего боевого ИИ (преследует, обходит, укрывается)
+-- Дальше дистанции боя враг не считается: иначе NPC садятся в перестрелку через всю
+-- улицу, почти не попадают и стоят бесконечно. Отряд продолжает сближаться.
+local function FightingRaw(npc)
     local e = npc:GetEnemy()
     if not IsValid(e) then return false end
     if e.Health and e:Health() <= 0 then return false end
+    local range = OW.CVars.engage_dist and OW.CVars.engage_dist:GetFloat() or 1200
     local d = npc:GetPos():DistToSqr(e:GetPos())
-    if d > 2500 * 2500 then return false end
-    return d < 700 * 700 or npc:Visible(e)
+    if d <= range * range and (d < 600 * 600 or npc:Visible(e)) then
+        npc.OW_LastCombat = CurTime()
+        return true
+    end
+    local linger = OW.CVars.combat_linger and OW.CVars.combat_linger:GetFloat() or 0
+    return npc.OW_LastCombat ~= nil and CurTime() - npc.OW_LastCombat < linger
+        and d <= (range * 1.3) ^ 2
 end
 
--- Отдать NPC его собственному боевому ИИ
+function OW.IsFighting(npc)
+    local f = FightingRaw(npc)
+    if f and not npc.OW_CombatSince then
+        npc.OW_CombatSince = CurTime()
+        local e = npc:GetEnemy()
+        Log(npc, string.format("БОЙ начат: враг %s на %.0f, виден=%s", IsValid(e) and e:GetClass() or "?",
+            IsValid(e) and npc:GetPos():Distance(e:GetPos()) or -1, tostring(IsValid(e) and npc:Visible(e))))
+    elseif not f and npc.OW_CombatSince then
+        Log(npc, string.format("БОЙ окончен через %.1f с", CurTime() - npc.OW_CombatSince))
+        npc.OW_CombatSince, npc.OW_PushUntil = nil, nil
+    end
+    return f
+end
+
+-- Отдать NPC его собственному боевому ИИ. Если перестрелка затянулась на дистанции —
+-- короткий рывок к врагу, чтобы не стоять друг напротив друга вечно.
 function OW.Engage(npc)
+    local now = CurTime()
+    local e = npc:GetEnemy()
+    if IsValid(e) and npc.OW_CombatSince and now - npc.OW_CombatSince > 12
+       and npc:GetPos():DistToSqr(e:GetPos()) > 500 * 500 then
+        if not npc.OW_PushUntil and now >= (npc.OW_NextPush or 0) then
+            local dir = e:GetPos() - npc:GetPos()
+            dir.z = 0
+            dir:Normalize()
+            npc.OW_PushTarget = FloorAt(npc:GetPos() + dir * 250) or (npc:GetPos() + dir * 250)
+            npc.OW_PushUntil, npc.OW_NextPush = now + 3, now + 10
+            Log(npc, string.format("рывок к врагу (до него %.0f)", npc:GetPos():Distance(e:GetPos())))
+        end
+        if npc.OW_PushUntil and now < npc.OW_PushUntil then
+            OW.MoveTo(npc, npc.OW_PushTarget, 100)
+            return
+        end
+        npc.OW_PushUntil = nil
+    end
     OW.Stop(npc)
 end
 
@@ -349,10 +394,9 @@ function OW.SetupRelationships(npc)
             other:AddEntityRelationship(npc, disp, 99)
         end
     end
-    if cv_ignorePlayers:GetBool() then
-        for _, ply in ipairs(player.GetAll()) do
-            npc:AddEntityRelationship(ply, D_NU, 99)
-        end
+    -- Отношения с игроками (команда игрока / нейтральность) — sv_outpost_players.lua
+    for _, ply in ipairs(player.GetAll()) do
+        if OW.RelatePlayer then OW.RelatePlayer(npc, ply) end
     end
 end
 
@@ -369,14 +413,16 @@ function OW.Register(npc, outpost)
     npc.OW_ReserveSince = CurTime()
     npc.OW_SpawnClass = outpost:GetNPCClass()
     npc.OW_SpawnWeapon = outpost:GetNPCWeapon()
+    npc:SetNWInt("OW_Team", npc.OW_Team)
+    OW.TeamSpawn = OW.TeamSpawn or {}
+    OW.TeamSpawn[npc.OW_Team] = { class = npc.OW_SpawnClass, weapon = npc.OW_SpawnWeapon }
     OW.SetupRelationships(npc)
     OW.NPCs[npc] = true
 end
 
 hook.Add("PlayerInitialSpawn", "OutpostWar_IgnorePlayers", function(ply)
-    if not cv_ignorePlayers:GetBool() then return end
     for npc in pairs(OW.NPCs) do
-        if IsValid(npc) then npc:AddEntityRelationship(ply, D_NU, 99) end
+        if IsValid(npc) and OW.RelatePlayer then OW.RelatePlayer(npc, ply) end
     end
 end)
 
@@ -402,6 +448,8 @@ end
 
 -- Распустить отряд: все становятся резервом аванпоста home
 function OW.DisbandSquad(sq, home)
+    if IsValid(sq.leaderEnt) then sq.leaderEnt:SetNWBool("OW_Leader", false) end
+    if IsValid(sq.player) then sq.player.OW_Squad = nil sq.player:SetNWInt("OW_SquadCount", 0) end
     for _, npc in ipairs(sq.members) do
         if IsValid(npc) then
             npc.OW_Squad = nil
@@ -415,12 +463,33 @@ function OW.DisbandSquad(sq, home)
     OW.Squads[sq.id] = nil
 end
 
+-- Точка строя, до которой реально можно дойти: есть пол и от лидера до неё нет стены.
+-- Иначе уменьшаем смещение, а в крайнем случае — сам лидер.
+local HULL_MINS, HULL_MAXS = Vector(-16, -16, 20), Vector(16, 16, 64)
+local function SafeFormationPoint(leader, offset)
+    local lpos = leader:GetPos()
+    for _, k in ipairs({ 1, 0.5 }) do
+        local p = lpos + offset * k
+        local tr = util.TraceHull({
+            start = lpos, endpos = p, mins = HULL_MINS, maxs = HULL_MAXS,
+            mask = MASK_NPCSOLID_BRUSHONLY, filter = leader,
+        })
+        if not tr.Hit then
+            local f = FloorAt(p)
+            if f and math.abs(f.z - lpos.z) < 40 then return f end
+        end
+    end
+    return lpos
+end
+
 local function FormationOffset(i, n)
     local count = math.max(n - 1, 1)
     local a = (i - 2) / count * math.pi * 2
     local r = 90 + (i % 2) * 40
     return Vector(math.cos(a) * r, math.sin(a) * r, 0)
 end
+OW.FormationOffset = FormationOffset
+OW.SafeFormationPoint = SafeFormationPoint
 
 function OW.SquadTick(sq)
     -- убираем мёртвых
@@ -428,10 +497,22 @@ function OW.SquadTick(sq)
         local n = sq.members[i]
         if not OW.IsAlive(n) or n.OW_Squad ~= sq then table.remove(sq.members, i) end
     end
-    if #sq.members == 0 then OW.Squads[sq.id] = nil return end
+    if #sq.members == 0 then
+        if sq.player and IsValid(sq.player) then return end   -- отряд игрока ждёт новых бойцов
+        OW.Squads[sq.id] = nil
+        return
+    end
+    if sq.player then return OW.PlayerSquadTick(sq) end
 
     local leader = sq.members[1]
     local t = sq.target
+
+    -- Звёздочка над лидером (рисует клиент)
+    if sq.leaderEnt ~= leader then
+        if IsValid(sq.leaderEnt) then sq.leaderEnt:SetNWBool("OW_Leader", false) end
+        leader:SetNWBool("OW_Leader", true)
+        sq.leaderEnt = leader
+    end
 
     -- Цель уже наша -> отряд становится её гарнизоном
     if IsValid(t) and t:GetOPTeam() == sq.team then
@@ -501,7 +582,7 @@ function OW.SquadTick(sq)
             if OW.IsFighting(m) then
                 OW.Engage(m)
             else
-                local goal = lpos + FormationOffset(i, #sq.members)
+                local goal = SafeFormationPoint(leader, FormationOffset(i, #sq.members))
                 if m:GetPos():DistToSqr(goal) > 140 * 140 then
                     OW.MoveTo(m, goal, 200)
                 end
@@ -562,8 +643,29 @@ local function DoorIsClosed(door)
     return st == 1 or st == 3
 end
 
+-- Стекло: навмеш (nav_generate) считает его проходимым, поэтому маршрут может
+-- идти сквозь окно. Если NPC упирается в стекло — разбиваем его.
+local GLASS_CLASSES = { func_breakable_surf = true, func_breakable = true }
+
+local function BreakGlass(npc, dir)
+    local start = npc:WorldSpaceCenter()
+    local tr = util.TraceLine({ start = start, endpos = start + dir * 90, filter = npc })
+    local ent = tr.Entity
+    if not (IsValid(ent) and GLASS_CLASSES[ent:GetClass()]) then return end
+    if ent.OW_Broken then return end
+    ent.OW_Broken = true
+    if ent:GetClass() == "func_breakable_surf" then
+        ent:Fire("Shatter", "0.5 0.5 200")
+    else
+        ent:Fire("Break")
+    end
+    OW.Log(npc, "разбил стекло " .. ent:GetClass())
+end
+
 function OW.DoorTick()
-    if not (OW.CVars.open_doors and OW.CVars.open_doors:GetBool()) then return end
+    local doors = OW.CVars.open_doors and OW.CVars.open_doors:GetBool()
+    local glass = OW.CVars.break_glass and OW.CVars.break_glass:GetBool()
+    if not doors and not glass then return end
     local now = CurTime()
     for npc in pairs(OW.NPCs) do
         if IsValid(npc) and npc.OW_Target then
@@ -572,6 +674,8 @@ function OW.DoorTick()
             dir.z = 0
             if dir:LengthSqr() > 1 then
                 dir:Normalize()
+                if glass then BreakGlass(npc, dir) end
+                if doors then
                 for _, door in ipairs(ents.FindInSphere(pos + dir * 50 + Vector(0, 0, 40), 70)) do
                     if DOOR_CLASSES[door:GetClass()] and now >= (door.OW_NextOpen or 0) and DoorIsClosed(door) then
                         door.OW_NextOpen = now + 2
@@ -587,6 +691,7 @@ function OW.DoorTick()
                         end
                     end
                 end
+                end
             end
         end
     end
@@ -599,6 +704,8 @@ function OW.Tick()
     for npc in pairs(OW.NPCs) do
         if not OW.IsAlive(npc) then OW.NPCs[npc] = nil end
     end
+
+    if OW.PlayersTick then OW.PlayersTick() end   -- набор бойцов в отряды игроков
 
     for _, op in ipairs(OW.GetOutposts()) do
         if op.BrainTick then op:BrainTick() end

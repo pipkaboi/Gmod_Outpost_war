@@ -23,14 +23,7 @@ TOOL.Information = {
     { name = "reload" },
 }
 
-if CLIENT then
-    language.Add("tool.outpost_tool.name", "Outpost Creator")
-    language.Add("tool.outpost_tool.desc", "Аванпост спавнит отряды NPC, которые захватывают чужие аванпосты")
-    language.Add("tool.outpost_tool.left", "Поставить аванпост")
-    language.Add("tool.outpost_tool.right", "Удалить аванпост")
-    language.Add("tool.outpost_tool.reload", "Применить текущие настройки к аванпосту")
-    language.Add("Undone_Outpost", "Аванпост отменён")
-end
+-- Тексты инструмента — в resource/localization/<язык>/outpost_war.properties
 
 function TOOL:GetSettings()
     local npc = self:GetClientInfo("npc")
@@ -96,14 +89,13 @@ function TOOL:Reload(tr)
 end
 
 function TOOL.BuildCPanel(pnl)
-    pnl:Help("Аванпост спавнит NPC волнами. Сначала заполняется гарнизон (охрана), "
-        .. "остальные собираются в отряд и идут захватывать ближайший чужой аванпост. "
-        .. "Команда 0 = нейтральный аванпост (никого не спавнит, его можно захватить).")
+    local L = OutpostWar.L
+    pnl:Help(L("tool_help"))
 
-    pnl:NumSlider("Команда", "outpost_tool_team", 0, 10, 0)
+    pnl:NumSlider(L("team"), "outpost_tool_team", 0, 10, 0)
 
     -- Выбор NPC из списка спавн-меню (включая NPC из других аддонов)
-    local npcBox = pnl:ComboBox("Тип NPC")
+    local npcBox = pnl:ComboBox(L("npc_type"))
     npcBox:SetSortItems(false)
     local current = GetConVarString("outpost_tool_npc")
     local npcs = {}
@@ -117,7 +109,7 @@ function TOOL.BuildCPanel(pnl)
     end
 
     -- Оружие. Первый пункт показывает, чем NPC вооружён по умолчанию
-    local wepBox = pnl:ComboBox("Оружие")
+    local wepBox = pnl:ComboBox(L("weapon"))
     wepBox:SetSortItems(false)
 
     local function WeaponTitle(cls)
@@ -132,16 +124,16 @@ function TOOL.BuildCPanel(pnl)
         wepBox:Clear()
 
         local data = list.Get("NPC")[npcKey]
-        local def = "По умолчанию"
+        local def = L("weapon_default")
         if data and data.Weapons and #data.Weapons > 0 then
             local names = {}
             for _, cls in ipairs(data.Weapons) do table.insert(names, WeaponTitle(cls)) end
             def = def .. ": " .. table.concat(names, " / ")
         else
-            def = def .. " (своё оружие NPC)"
+            def = L("weapon_default_own")
         end
         wepBox:AddChoice(def, "default", curWep == "default" or curWep == "")
-        wepBox:AddChoice("Без оружия", "none", curWep == "none")
+        wepBox:AddChoice(L("weapon_none"), "none", curWep == "none")
 
         local weps = {}
         for _, w in pairs(list.Get("NPCUsableWeapons")) do
@@ -160,14 +152,13 @@ function TOOL.BuildCPanel(pnl)
     end
     wepBox.OnSelect = function(_, _, _, cls) RunConsoleCommand("outpost_tool_weapon", cls) end
 
-    pnl:NumSlider("Макс. NPC с аванпоста", "outpost_tool_max_npcs", 1, 40, 0)
-    pnl:NumSlider("Размер отряда (и волны)", "outpost_tool_squad_size", 1, 10, 0)
-    pnl:NumSlider("Гарнизон (охрана)", "outpost_tool_garrison", 0, 10, 0)
-    pnl:NumSlider("Пауза между волнами (сек)", "outpost_tool_spawn_delay", 2, 120, 0)
-    pnl:NumSlider("Радиус зоны захвата", "outpost_tool_radius", 100, 1000, 0)
-    pnl:NumSlider("Лимит NPC за всё время (0 = без лимита)", "outpost_tool_spawn_limit", 0, 200, 0)
-    pnl:ControlHelp("Когда аванпост выпустит столько NPC, он опустеет и больше никого не создаст. "
-        .. "R инструментом по аванпосту сбрасывает счётчик.")
+    pnl:NumSlider(L("max_npcs"), "outpost_tool_max_npcs", 1, 40, 0)
+    pnl:NumSlider(L("squad_size"), "outpost_tool_squad_size", 1, 10, 0)
+    pnl:NumSlider(L("garrison"), "outpost_tool_garrison", 0, 10, 0)
+    pnl:NumSlider(L("spawn_delay"), "outpost_tool_spawn_delay", 2, 120, 0)
+    pnl:NumSlider(L("radius"), "outpost_tool_radius", 100, 1000, 0)
+    pnl:NumSlider(L("spawn_limit"), "outpost_tool_spawn_limit", 0, 200, 0)
+    pnl:ControlHelp(L("spawn_limit_help"))
 
-    pnl:Help("Серверные настройки: вкладка Outpost War → Settings → Server Settings.")
+    pnl:Help(L("server_hint"))
 end

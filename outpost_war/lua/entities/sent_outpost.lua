@@ -3,7 +3,7 @@ AddCSLuaFile()
 
 ENT.Type = "anim"
 ENT.Base = "base_anim"
-ENT.PrintName = "Аванпост"
+ENT.PrintName = "Outpost"
 ENT.Category = "Outpost War"
 ENT.Spawnable = false          -- ставится через инструмент "Аванпост"
 ENT.RenderGroup = RENDERGROUP_BOTH
@@ -161,8 +161,7 @@ if SERVER then
             npc:Remove()
             if self.OW_BadClass ~= key then
                 self.OW_BadClass = key
-                PrintMessage(HUD_PRINTTALK, "[Аванпосты] '" .. key .. "' не является NPC HL2 "
-                    .. "(скорее всего некстбот) и не поддерживается. Выберите другого NPC.")
+                OW.Notify("msg_badclass", key)
             end
             return
         end
@@ -182,8 +181,7 @@ if SERVER then
 
         self:SetSpawnedTotal(self:GetSpawnedTotal() + 1)
         if self:IsDepleted() then
-            PrintMessage(HUD_PRINTTALK, string.format("[Аванпосты] Аванпост (%s) опустел: выпущено %d NPC",
-                OW.TeamName(team), self:GetSpawnedTotal()))
+            OW.Notify("msg_depleted", { team = team }, self:GetSpawnedTotal())
         end
         return npc
     end
@@ -298,6 +296,13 @@ if SERVER then
                 sample[t] = sample[t] or npc
             end
         end
+        -- Игроки, вступившие в команду, тоже захватывают и защищают точки
+        for _, ply in ipairs(player.GetAll()) do
+            local t = ply:GetNWInt("OW_Team", 0)
+            if t > 0 and ply:Alive() and ply:GetPos():DistToSqr(pos) <= r2 then
+                counts[t] = (counts[t] or 0) + 1
+            end
+        end
 
         local my = self:GetOPTeam()
         local defenders = counts[my] or 0
@@ -337,13 +342,16 @@ if SERVER then
         if IsValid(byNPC) and byNPC.OW_SpawnClass then
             self:SetNPCClass(byNPC.OW_SpawnClass)
             self:SetNPCWeapon(byNPC.OW_SpawnWeapon or "default")
+        elseif OW.TeamSpawn and OW.TeamSpawn[team] then
+            -- захватили игроки: берём NPC, которых эта команда спавнит на других аванпостах
+            self:SetNPCClass(OW.TeamSpawn[team].class)
+            self:SetNPCWeapon(OW.TeamSpawn[team].weapon)
         end
         self:SetCapProgress(0)
         self:SetCapTeam(0)
         self:UpdateColor()
         self.OW_NextWave = CurTime() + self:GetSpawnDelay()
-        PrintMessage(HUD_PRINTTALK, string.format("[Аванпосты] %s захватила аванпост (%s)",
-            OW.TeamName(team), OW.TeamName(old)))
+        OW.Notify("msg_captured", { team = team }, { team = old })
     end
 end
 
@@ -390,9 +398,9 @@ if CLIENT then
             if team ~= 0 and limit > 0 then
                 local txt, tcol
                 if self:IsDepleted() then
-                    txt, tcol = "ОПУСТЕЛ", Color(160, 160, 160)
+                    txt, tcol = OW.L("depleted"), Color(160, 160, 160)
                 else
-                    txt, tcol = string.format("NPC: %d / %d", self:GetSpawnedTotal(), limit), color_white
+                    txt, tcol = string.format(OW.L("npc_count"), self:GetSpawnedTotal(), limit), color_white
                 end
                 draw.SimpleTextOutlined(txt, "OutpostWar_Small", 0, -52, tcol,
                     TEXT_ALIGN_CENTER, TEXT_ALIGN_BOTTOM, 2, color_black)
@@ -406,7 +414,7 @@ if CLIENT then
                 surface.DrawRect(-w / 2, 8, w, h)
                 surface.SetDrawColor(capCol.r, capCol.g, capCol.b, 255)
                 surface.DrawRect(-w / 2 + 2, 10, (w - 4) * math.Clamp(prog, 0, 1), h - 4)
-                draw.SimpleTextOutlined(string.format("Захват: %d%%", prog * 100), "OutpostWar_Small",
+                draw.SimpleTextOutlined(string.format(OW.L("capture"), math.floor(prog * 100)), "OutpostWar_Small",
                     0, 8 + h + 4, color_white, TEXT_ALIGN_CENTER, TEXT_ALIGN_TOP, 2, color_black)
             end
         cam.End3D2D()
