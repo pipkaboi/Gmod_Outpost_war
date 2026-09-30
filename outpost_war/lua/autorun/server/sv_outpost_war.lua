@@ -72,9 +72,10 @@ function OW.RandomPointNear(center, radius)
             mask = MASK_NPCSOLID_BRUSHONLY,
         })
         if tr.Hit and not tr.StartSolid then
-            local vis = util.TraceLine({
+            local vis = util.TraceHull({
                 start = center + Vector(0, 0, 40), endpos = tr.HitPos + Vector(0, 0, 40),
-                mask = MASK_SOLID_BRUSHONLY,
+                mins = Vector(-8, -8, -8), maxs = Vector(8, 8, 8),
+                mask = MASK_NPCSOLID, filter = OW.WalkFilter,   -- заборы и пропы тоже мешают
             })
             if not vis.Hit then return tr.HitPos + Vector(0, 0, 4) end
         end
@@ -97,13 +98,21 @@ local function IsVJ(npc)
 end
 
 local function IsMoving(npc)
-    if IsVJ(npc) then return npc.IsMoving and npc:IsMoving() or false end
+    if IsVJ(npc) then
+        -- у VJ свои Lua-расписания: смотрим на реальное движение, и даём секунду на разгон
+        if CurTime() - (npc.OW_IssueTime or 0) < 1 then return true end
+        return (npc.IsMoving and npc:IsMoving()) or npc:GetVelocity():Length2DSqr() > 400
+    end
     return npc:IsCurrentSchedule(SCHED_FORCED_GO_RUN) or npc:IsCurrentSchedule(SCHED_FORCED_GO)
 end
 
+-- VJ-NPC двигаем двумя способами по очереди: командой VJ Base и обычным приказом движка.
+-- По журналу команда VJ у некоторых NPC (Soviet Spetsnaz) не срабатывает вообще —
+-- после провала пробуем другой способ.
 local function IssueMove(npc, target)
     npc:SetLastPosition(target)
-    if IsVJ(npc) then
+    npc.OW_IssueTime = CurTime()
+    if IsVJ(npc) and not npc.OW_VJEngine then
         local task = npc.OW_UseWalk and "TASK_WALK_PATH" or "TASK_RUN_PATH"
         if npc.SCHEDULE_GOTO_POSITION then npc:SCHEDULE_GOTO_POSITION(task) return end
         if npc.VJ_TASK_GOTO_LASTPOS then npc:VJ_TASK_GOTO_LASTPOS(task) return end
@@ -163,7 +172,7 @@ local function StepPoint(npc, goal, fails)
         local fwd = Angle(0, yaw, 0):Forward()
         local tr = util.TraceHull({
             start = from, endpos = from + fwd * STEP,
-            mins = mins, maxs = maxs, mask = MASK_NPCSOLID_BRUSHONLY, filter = npc,
+            mins = mins, maxs = maxs, mask = MASK_NPCSOLID, filter = OW.WalkFilter,
         })
         local len = tr.Fraction * STEP
         if len > 120 then
@@ -215,6 +224,7 @@ local function DirectMove(npc, pos, tolerance)
         Log(npc, string.format("провал #%d: running=%s, до точки %.0f", (npc.OW_Fail or 0) + 1,
             tostring(running), npc.OW_Target and mypos:Distance(npc.OW_Target) or -1))
         npc.OW_Fail = (npc.OW_Fail or 0) + 1
+        if IsVJ(npc) then npc.OW_VJEngine = not npc.OW_VJEngine end
         npc.OW_StepUntil = now + 6                  -- 6 сек идём шагами
         if npc.OW_Fail % 4 == 0 then npc.OW_UseWalk = not npc.OW_UseWalk end
     end
@@ -226,19 +236,62 @@ local function DirectMove(npc, pos, tolerance)
     npc.OW_Goal, npc.OW_Target = pos, target
     npc.OW_LastPos, npc.OW_LastMove = mypos, now
     IssueMove(npc, target)
-    Log(npc, string.format("приказ: до точки %.0f%s, running до этого=%s", mypos:Distance(target),
-        npc.OW_Stepping and " (шаг)" or "", tostring(running)))
+    Log(npc, string.format("приказ: до точки %.0f%s%s, running до этого=%s, pos=%d %d", mypos:Distance(target),
+        npc.OW_Stepping and " (шаг)" or "", IsVJ(npc) and (npc.OW_VJEngine and " [движок]" or " [VJ]") or "",
+        tostring(running), mypos.x, mypos.y))
 end
 
 -- Отправить NPC к точке pos. Если далеко и на карте есть навмеш — идём по маршруту
 -- по навмешу (sv_outpost_path.lua, белые линии в отладке), иначе — прямым приказом.
 local PATH_MIN_DIST = 450
 
+-- Выход из тупика: если NPC 8 секунд почти не сдвигается, хотя получает приказы идти,
+-- отводим его на пару метров в свободную сторону и перестраиваем маршрут.
+local function Unstick(npc)
+    local now, p = CurTime(), npc:GetPos()
+    if npc.OW_UnstickUntil and now < npc.OW_UnstickUntil then return true end
+    -- приказы шли с перерывом (NPC стоял по своей воле) — считаем заново
+    local gap = now - (npc.OW_LastMoveCall or 0) > 1.5
+    npc.OW_LastMoveCall = now
+    if gap or not npc.OW_SPos or p:DistToSqr(npc.OW_SPos) > 60 * 60 then
+        npc.OW_SPos, npc.OW_STime = p, now
+        return false
+    end
+    if now - (npc.OW_STime or now) < 8 then return false end
+    npc.OW_STime = now
+    for _ = 1, 10 do
+        local dir = Angle(0, math.Rand(0, 360), 0):Forward()
+        local tr = util.TraceHull({
+            start = p + Vector(0, 0, 4), endpos = p + dir * 200 + Vector(0, 0, 4),
+            mins = Vector(-16, -16, 18), maxs = Vector(16, 16, 64),
+            mask = MASK_NPCSOLID, filter = OW.WalkFilter,
+        })
+        if tr.Fraction > 0.5 then
+            local f = FloorAt(p + dir * 200 * tr.Fraction * 0.9)
+            if f then
+                Log(npc, string.format("застрял 8 с -> отход на %.0f", 200 * tr.Fraction * 0.9))
+                if npc.OW_Path then npc.OW_Path.failed = true end
+                npc.OW_NextRepath, npc.OW_Fail = 0, 0
+                npc.OW_Goal, npc.OW_Target = nil, f
+                npc.OW_UnstickUntil = now + 2.5
+                IssueMove(npc, f)
+                return true
+            end
+        end
+    end
+    return false
+end
+
 function OW.MoveTo(npc, pos, tolerance)
+    if Unstick(npc) then return end
     local mypos = npc:GetPos()
     local P = OW.Path
 
-    if not (P and P.Available()) or mypos:DistToSqr(pos) < PATH_MIN_DIST * PATH_MIN_DIST then
+    -- Близкую точку — напрямую; но если напрямую дважды не вышло (например, за забором
+    -- и надо обойти через калитку), тоже строим маршрут по навмешу.
+    local near = mypos:DistToSqr(pos) < PATH_MIN_DIST * PATH_MIN_DIST and (npc.OW_Fail or 0) < 2
+        and not npc.OW_Path
+    if not (P and P.Available()) or near then
         npc.OW_Path, npc.OW_NoRoute = nil, nil
         return DirectMove(npc, pos, tolerance)
     end
@@ -273,7 +326,9 @@ function OW.MoveTo(npc, pos, tolerance)
         local wp = path.wps[path.idx]
         local d2 = mypos:DistToSqr(wp)
         -- следующую точку выдаём заранее (за 120 юнитов), чтобы NPC не останавливался
-        if d2 < 120 * 120 or (d2 < 220 * 220 and P.ClearWalk(mypos, path.wps[path.idx + 1])) then
+        -- 160 — не меньше порога "дошёл" (150) в DirectMove. Раньше было 120: у стены/угла NPC
+        -- (особенно VJ) вставал в ~140 от точки, считал её достигнутой, а маршрут не шёл дальше.
+        if d2 < 160 * 160 or (d2 < 220 * 220 and P.ClearWalk(mypos, path.wps[path.idx + 1])) then
             path.idx = path.idx + 1
         else
             break
@@ -281,21 +336,43 @@ function OW.MoveTo(npc, pos, tolerance)
     end
 
     local wp = path.idx == #path.wps and pos or path.wps[path.idx]
+    if path.idx == #path.wps and mypos:DistToSqr(pos) < 150 * 150 then
+        npc.OW_Path = nil   -- дошли: дальше снова напрямую
+    end
     DirectMove(npc, wp, 30)
 
     if (npc.OW_Fail or 0) >= 2 then path.failed = true end
+    -- 4 провала подряд у одной точки: там, видимо, проп (забор, ворота), который навмеш
+    -- считает проходимым. Закрываем это место для маршрутов на минуту -> обход.
+    -- Закрываем, только если путь к точке действительно перегораживает проп (а не толпа/стена).
+    local blocker
+    if (npc.OW_Fail or 0) >= 4 then
+        local tr = util.TraceHull({
+            start = mypos + Vector(0, 0, 4), endpos = wp + Vector(0, 0, 4),
+            mins = Vector(-16, -16, 20), maxs = Vector(16, 16, 64),
+            mask = MASK_NPCSOLID, filter = OW.WalkFilter,
+        })
+        blocker = tr.Hit and IsValid(tr.Entity) and not tr.Entity:IsWorld()
+        if not blocker then npc.OW_Fail = 0 end
+    end
+    if blocker and P.BlockAt then
+        P.BlockAt(wp, 48)
+        npc.OW_Fail, npc.OW_NextRepath = 0, 0
+        Log(npc, string.format("точка маршрута недостижима -> закрыта на 60 с (%d %d)", wp.x, wp.y))
+    end
 end
 
 -- Прервать наш приказ движения (чтобы NPC мог стрелять / стоять)
 function OW.Stop(npc)
     if IsMoving(npc) then StopMove(npc) end
     npc.OW_Goal, npc.OW_Target = nil, nil
+    npc.OW_SPos, npc.OW_STime = npc:GetPos(), CurTime()   -- стоять по приказу — не застревание
 end
 
 function OW.DebugDraw()
     if not cv_debug:GetBool() then return end
     for npc in pairs(OW.NPCs) do
-        if IsValid(npc) then
+        if IsValid(npc) and not npc.OW_Passive then
             local col = OW.TeamColor(npc.OW_Team)
             local label = npc.OW_Role or "?"
             if npc.OW_Squad then
@@ -332,6 +409,7 @@ end
 -- Дальше дистанции боя враг не считается: иначе NPC садятся в перестрелку через всю
 -- улицу, почти не попадают и стоят бесконечно. Отряд продолжает сближаться.
 local function FightingRaw(npc)
+    if not npc.GetEnemy then return false end
     local e = npc:GetEnemy()
     if not IsValid(e) then return false end
     if e.Health and e:Health() <= 0 then return false end
@@ -404,7 +482,14 @@ function OW.SetupRelationships(npc)
 end
 
 function OW.Register(npc, outpost)
-    if not (IsValid(npc) and npc:IsNPC()) then return end
+    if not IsValid(npc) then return end
+    if not npc:IsNPC() then
+        -- некстбот и т.п.: считается в лимитах и захвате, но приказов не получает
+        npc.OW_Team, npc.OW_Home, npc.OW_Role, npc.OW_Passive = outpost:GetOPTeam(), outpost, "passive", true
+        npc:SetNWInt("OW_Team", npc.OW_Team)
+        OW.NPCs[npc] = true
+        return
+    end
     if IsVJ(npc) then
         -- VJ Base определяет своих/чужих по собственным классам
         npc.VJ_NPC_Class = { "CLASS_OUTPOST_TEAM_" .. outpost:GetOPTeam() }
@@ -480,7 +565,7 @@ local function SafeFormationPoint(leader, offset)
         local p = lpos + offset * k
         local tr = util.TraceHull({
             start = lpos, endpos = p, mins = HULL_MINS, maxs = HULL_MAXS,
-            mask = MASK_NPCSOLID_BRUSHONLY, filter = leader,
+            mask = MASK_NPCSOLID, filter = OW.WalkFilter,
         })
         if not tr.Hit then
             local f = FloorAt(p)
@@ -722,7 +807,7 @@ function OW.Tick()
     for _, sq in pairs(OW.Squads) do OW.SquadTick(sq) end
 
     for npc in pairs(OW.NPCs) do
-        if not npc.OW_Squad then OW.GuardTick(npc) end
+        if not npc.OW_Squad and not npc.OW_Passive then OW.GuardTick(npc) end
     end
 
     OW.DoorTick()
@@ -742,4 +827,4 @@ concommand.Add("outpost_war_clear_npcs", function(ply)
     OW.NPCs, OW.Squads = {}, {}
 end)
 
-MsgN("[Outpost War] sv_outpost_war.lua загружен — движение v12 (отрезки по 200)")
+MsgN("[Outpost War] sv_outpost_war.lua загружен — движение v14")

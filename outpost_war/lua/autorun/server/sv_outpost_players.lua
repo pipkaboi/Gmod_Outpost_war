@@ -29,13 +29,22 @@ function OW.RelatePlayer(npc, ply)
         disp = npc.OW_PlyDefault[ply]
     end
     npc:AddEntityRelationship(ply, disp, 99)
-    -- союзник перестаёт считать игрока врагом сразу, а не после смены цели
-    if disp == D_LI and npc:GetEnemy() == ply then npc:SetEnemy(NULL) end
+    -- если игрок больше не враг — NPC сразу забывает про него, а не после смены цели
+    if disp ~= D_HT and disp ~= D_FR then
+        if npc:GetEnemy() == ply then npc:SetEnemy(NULL) end
+        if npc.ClearEnemyMemory then npc:ClearEnemyMemory(ply) end
+    end
 end
+
 
 local function RelateAll(ply)
     for npc in pairs(OW.NPCs) do OW.RelatePlayer(npc, ply) end
 end
+
+-- Галочка "NPC не трогают игроков" применяется сразу ко всем NPC, а не только к новым
+cvars.AddChangeCallback("outpost_war_ignore_players", function()
+    for _, ply in ipairs(player.GetAll()) do RelateAll(ply) end
+end, "OutpostWar_IgnorePlayers")
 
 ---------------------------------------------------------------------------
 -- Вступление в команду

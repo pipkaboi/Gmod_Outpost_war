@@ -86,9 +86,53 @@ end
 ---------------------------------------------------------------------------
 -- Проходимость и стоимость
 ---------------------------------------------------------------------------
+-- Перегорожен ли переход между областями пропом (забор, ворота, машина).
+-- nav_generate пропы часто не учитывает и прокладывает навмеш сквозь сетчатый забор.
+-- Проверяем три параллельные линии между центрами областей: забор перекрывает все три,
+-- а случайная машина посреди большой области — обычно не все. Стены не проверяем —
+-- их навмеш уже знает. Результат кэшируем на минуту.
+local EDGE_CACHE, EDGE_TIME = {}, 0
+local EMINS, EMAXS = Vector(-12, -12, 20), Vector(12, 12, 56)
+
+local function PropFilter(e)
+    if not OW.WalkFilter(e) then return false end
+    return not e:IsWorld()
+end
+
+local function EdgeBlocked(from, to)
+    if CurTime() - EDGE_TIME > 60 then EDGE_CACHE, EDGE_TIME = {}, CurTime() end
+    local key = from:GetID() * 65536 + to:GetID()
+    local c = EDGE_CACHE[key]
+    if c ~= nil then return c end
+
+    local a, b = from:GetCenter(), to:GetCenter()
+    local dir = b - a
+    dir.z = 0
+    local blocked = true
+    if dir:LengthSqr() < 1 then
+        blocked = false
+    else
+        dir:Normalize()
+        local side = Vector(-dir.y, dir.x, 0)
+        for _, off in ipairs({ 0, 28, -28 }) do
+            local tr = util.TraceHull({
+                start = a + side * off, endpos = b + side * off,
+                mins = EMINS, maxs = EMAXS, mask = MASK_NPCSOLID, filter = PropFilter,
+            })
+            if not (tr.Hit and IsValid(tr.Entity) and not tr.Entity:IsWorld()) then
+                blocked = false
+                break
+            end
+        end
+    end
+    EDGE_CACHE[key] = blocked
+    return blocked
+end
+
 local function CanTraverse(from, to)
     local dz = from:ComputeAdjacentConnectionHeightChange(to)
-    return dz <= MAX_CLIMB and dz >= -MAX_DROP
+    if dz > MAX_CLIMB or dz < -MAX_DROP then return false end
+    return not EdgeBlocked(from, to)
 end
 
 local function StepCost(from, to)
@@ -229,7 +273,7 @@ end
 function P.ClearWalk(a, b)
     local tr = util.TraceHull({
         start = a, endpos = b, mins = HULL_MINS, maxs = HULL_MAXS,
-        mask = MASK_NPCSOLID_BRUSHONLY,
+        mask = MASK_NPCSOLID, filter = OW.WalkFilter,   -- учитываем и пропы (заборы, ворота)
     })
     if tr.Hit or tr.StartSolid then return false end
     local steps = math.floor(a:Distance(b) / 48)

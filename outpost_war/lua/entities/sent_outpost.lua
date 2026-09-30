@@ -83,9 +83,10 @@ if SERVER then
             local d = math.Rand(70, maxD)
             local p = base + Vector(math.cos(a) * d, math.sin(a) * d, 0)
 
-            local vis = util.TraceLine({
+            local vis = util.TraceHull({
                 start = base + Vector(0, 0, 40), endpos = p + Vector(0, 0, 40),
-                mask = MASK_SOLID_BRUSHONLY,
+                mins = Vector(-8, -8, -8), maxs = Vector(8, 8, 8),
+                mask = MASK_NPCSOLID, filter = OW.WalkFilter,   -- заборы и пропы тоже мешают
             })
             if not vis.Hit then
                 local tr = util.TraceLine({
@@ -110,7 +111,6 @@ if SERVER then
         if team == 0 or self:IsDepleted() then return end
 
         local key = self:GetNPCClass()
-        if self.OW_BadClass == key then return end
         local data = list.Get("NPC")[key]
         local class = data and data.Class or key
 
@@ -155,15 +155,11 @@ if SERVER then
         npc:Activate()
 
         -- Некоторые сущности из списка NPC на самом деле не NPC (некстботы и т.п.):
-        -- ими нельзя управлять через ИИ HL2, поэтому такие не поддерживаются.
+        -- спавним их, но управлять ими мод не может — предупреждаем один раз.
         if not IsValid(npc) then return end
-        if not npc:IsNPC() then
-            npc:Remove()
-            if self.OW_BadClass ~= key then
-                self.OW_BadClass = key
-                OW.Notify("msg_badclass", key)
-            end
-            return
+        if not npc:IsNPC() and self.OW_BadClass ~= key then
+            self.OW_BadClass = key
+            OW.Notify("msg_badclass", key)
         end
 
         if data and data.Health then
@@ -209,7 +205,7 @@ if SERVER then
         for npc in pairs(OW.NPCs) do
             if npc.OW_Home == self and npc.OW_Team == team and OW.IsAlive(npc) then
                 total = total + 1
-                if not npc.OW_Squad then
+                if not npc.OW_Squad and not npc.OW_Passive then
                     if npc.OW_Role == "guard" then
                         table.insert(guards, npc)
                     else

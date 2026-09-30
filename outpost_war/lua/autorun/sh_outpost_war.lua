@@ -95,3 +95,14 @@ else
 end
 
 cleanup.Register("outposts")
+
+-- Фильтр для проверок "можно ли пройти": стены И пропы (заборы, ворота, машины) — препятствия,
+-- а NPC, игроки, двери (мы их открываем) и стёкла (разбиваем) — нет.
+local PASSABLE = { prop_door_rotating = true, func_door = true, func_door_rotating = true,
+    func_breakable_surf = true, func_breakable = true }
+function OW.WalkFilter(e)
+    if not IsValid(e) then return true end
+    if e:IsNPC() or e:IsPlayer() or (e.IsNextBot and e:IsNextBot()) then return false end
+    if PASSABLE[e:GetClass()] or e:GetClass() == "sent_outpost" then return false end
+    return true
+end
