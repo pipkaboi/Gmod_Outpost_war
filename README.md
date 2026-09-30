@@ -17,4 +17,4 @@ Spawn menu (Q) → **Outpost War** tab → **Outpost Creator**.
 Console variables: `outpost_war_capture_time`, `outpost_war_ignore_players`, `outpost_war_tint`, `outpost_war_debug` (needs `developer 1`), command `outpost_war_clear_npcs`.
 
 ## Repository layout
-- `test_mod/` — the addon itself (this is what gets published to the Workshop).
+- `outpost_war/` — the addon itself (this is what gets published to the Workshop).
