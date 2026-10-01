@@ -151,7 +151,7 @@ function OW.PlayerSquadTick(sq)
         elseif ply:Alive() then
             -- держимся рядом с игроком (точка строя проверяется: пол, без стен)
             if m:GetPos():DistToSqr(ply:GetPos()) > 220 * 220 then
-                local goal = OW.SafeFormationPoint(ply, OW.FormationOffset(i + 1, n))
+                local goal = OW.SafeFormationPoint(ply, OW.FormationOffset(i + 1, n, ply))
                 OW.MoveTo(m, goal, 150)
             end
         end

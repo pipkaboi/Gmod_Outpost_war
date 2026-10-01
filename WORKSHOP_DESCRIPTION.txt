@@ -15,6 +15,9 @@
 [*]Per-outpost total NPC limit ("depleted" outposts)
 [*]Players join teams, capture points, respawn at their outposts and lead a squad of free NPCs
 [*]HUD: team, squad size, captured / total outposts. English and Russian
+[*]Squads march in a column along the leader's trail, wait their turn on narrow stairs
+[*]NPCs fight on their own (weapon range); compatible with combat AI mods (Combat Intelligence AI etc.) — the mod only leads NPCs to points and doesn't interrupt their maneuvers
+[*]Corpses and dropped weapons are removed after a while (configurable)
 [/list]
 
 [h2]Возможности[/h2]
@@ -29,6 +32,9 @@
 [*]Лимит NPC на аванпост за всё время (аванпост «пустеет»)
 [*]Игроки вступают в команды, захватывают точки, появляются на своих аванпостах и ведут отряд из свободных NPC
 [*]На экране: команда, отряд, захвачено / всего точек. Русский и английский
+[*]Отряды идут колонной по следу лидера, на узких лестницах ждут очереди
+[*]NPC воюют сами (по дальности своего оружия); совместим с модами на боевой ИИ (Combat Intelligence AI и др.) — мод только ведёт NPC к точкам и не перебивает их манёвры
+[*]Трупы и выпавшее оружие убираются через заданное время
 [/list]
 
 [h2]How to use / Как пользоваться[/h2]
@@ -53,8 +59,10 @@ Also in / Также в [b]Outpost War → Settings → Server Settings[/b].
 [table]
 [tr][th]ConVar[/th][th]Def.[/th][th]EN / RU[/th][/tr]
 [tr][td]outpost_war_capture_time[/td][td]15[/td][td]Seconds for one NPC to capture / Секунд на захват одним NPC[/td][/tr]
-[tr][td]outpost_war_engage_dist[/td][td]800[/td][td]Distance to a visible enemy to engage / Дистанция до видимого врага для вступления в бой[/td][/tr]
+[tr][td]outpost_war_engage_dist[/td][td]800[/td][td]Engage distance if native_combat = 0 / Дистанция боя, если native_combat = 0[/td][/tr]
 [tr][td]outpost_war_combat_linger[/td][td]8[/td][td]Seconds in combat after losing the enemy / Секунд боевой готовности после потери врага[/td][/tr]
+[tr][td]outpost_war_native_combat[/td][td]1[/td][td]NPCs decide when to fight (weapon range) / NPC сами решают, когда вступать в бой[/td][/tr]
+[tr][td]outpost_war_corpse_time[/td][td]20[/td][td]Remove corpses/weapons after N sec (0 = never) / Убирать трупы через N сек[/td][/tr]
 [tr][td]outpost_war_ignore_players[/td][td]0[/td][td]NPCs ignore players not in a team / NPC не трогают игроков вне команд[/td][/tr]
 [tr][td]outpost_war_tint[/td][td]1[/td][td]Tint NPCs with team color / Красить NPC в цвет команды[/td][/tr]
 [tr][td]outpost_war_open_doors[/td][td]1[/td][td]NPCs open doors / NPC открывают двери[/td][/tr]

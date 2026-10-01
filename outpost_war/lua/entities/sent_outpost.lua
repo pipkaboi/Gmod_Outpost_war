@@ -93,7 +93,8 @@ if SERVER then
                     start = p + Vector(0, 0, 64), endpos = p - Vector(0, 0, 256),
                     mask = MASK_NPCSOLID_BRUSHONLY,
                 })
-                if tr.Hit and not tr.StartSolid then
+                -- только тот же этаж, что и аванпост (не пол под балконом)
+                if tr.Hit and not tr.StartSolid and math.abs(tr.HitPos.z - (OW.FloorZ and OW.FloorZ(base) or base.z)) < 48 then
                     local pos = tr.HitPos + Vector(0, 0, 4)
                     local hull = util.TraceHull({
                         start = pos, endpos = pos,
@@ -280,13 +281,23 @@ if SERVER then
         return true
     end
 
+    -- Захватывать можно только с того же уровня: NPC этажом ниже (под полом) не считаются.
+    -- Большой перепад высоты допустим, если аванпост видно (склон холма).
+    function ENT:SameLevel(e)
+        local a, b = self:GetPos(), e:GetPos()
+        if math.abs(a.z - b.z) < 100 then return true end
+        local tr = util.TraceLine({ start = a + Vector(0, 0, 40), endpos = b + Vector(0, 0, 40),
+            mask = MASK_NPCSOLID_BRUSHONLY })
+        return not tr.Hit
+    end
+
     function ENT:UpdateCapture(dt)
         local pos = self:GetPos()
         local r2 = self:GetCapRadius() ^ 2
         local counts, sample = {}, {}
 
         for npc in pairs(OW.NPCs) do
-            if OW.IsAlive(npc) and npc:GetPos():DistToSqr(pos) <= r2 then
+            if OW.IsAlive(npc) and npc:GetPos():DistToSqr(pos) <= r2 and self:SameLevel(npc) then
                 local t = npc.OW_Team
                 counts[t] = (counts[t] or 0) + 1
                 sample[t] = sample[t] or npc
@@ -295,7 +306,7 @@ if SERVER then
         -- Игроки, вступившие в команду, тоже захватывают и защищают точки
         for _, ply in ipairs(player.GetAll()) do
             local t = ply:GetNWInt("OW_Team", 0)
-            if t > 0 and ply:Alive() and ply:GetPos():DistToSqr(pos) <= r2 then
+            if t > 0 and ply:Alive() and ply:GetPos():DistToSqr(pos) <= r2 and self:SameLevel(ply) then
                 counts[t] = (counts[t] or 0) + 1
             end
         end

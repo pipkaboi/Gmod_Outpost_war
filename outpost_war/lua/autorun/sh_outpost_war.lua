@@ -4,6 +4,7 @@ AddCSLuaFile()
 
 OutpostWar = OutpostWar or {}
 local OW = OutpostWar
+OW.VERSION = "1.1.0"   -- показывается в меню инструмента и настроек
 
 -- Серверные настройки. REPLICATED — чтобы клиент видел значения в меню настроек.
 local CV_FLAGS = bit.bor(FCVAR_ARCHIVE, FCVAR_REPLICATED, FCVAR_NOTIFY)
@@ -28,6 +29,10 @@ OW.CVars = {
         "1 = players in a team respawn at their team's outpost"),
     combat_linger  = CreateConVar("outpost_war_combat_linger", "8", CV_FLAGS,
         "Seconds NPCs stay in combat after losing sight of the enemy"),
+    native_combat  = CreateConVar("outpost_war_native_combat", "1", CV_FLAGS,
+        "1 = NPCs fight when THEIR OWN AI can shoot the enemy (weapon range), mod does not interfere; 0 = use engage_dist"),
+    corpse_time    = CreateConVar("outpost_war_corpse_time", "20", CV_FLAGS,
+        "Seconds before corpses and dropped weapons of outpost NPCs are removed (0 = never)"),
     debug          = CreateConVar("outpost_war_debug", "0", bit.bor(FCVAR_REPLICATED, FCVAR_NOTIFY),
         "1 = draw NPC routes, 2 = also write data/outpost_war_log.txt (needs developer 1)"),
 }

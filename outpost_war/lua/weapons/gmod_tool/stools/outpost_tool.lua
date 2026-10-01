@@ -90,6 +90,7 @@ end
 
 function TOOL.BuildCPanel(pnl)
     local L = OutpostWar.L
+    pnl:Help("Outpost War v" .. (OutpostWar.VERSION or "?"))
     pnl:Help(L("tool_help"))
 
     pnl:NumSlider(L("team"), "outpost_tool_team", 0, 10, 0)

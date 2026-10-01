@@ -21,10 +21,13 @@ hook.Add("PopulateToolMenu", "OutpostWar_Settings", function()
         "Server Settings", "", "", function(pnl)
             local L = OutpostWar.L
             pnl:ClearControls()
+            pnl:Help("Outpost War v" .. (OutpostWar.VERSION or "?"))
             pnl:Help(L("settings_admin"))
             pnl:NumSlider(L("capture_time"), "outpost_war_capture_time", 1, 120, 0)
+            pnl:CheckBox(L("native_combat"), "outpost_war_native_combat")
             pnl:NumSlider(L("engage_dist"), "outpost_war_engage_dist", 400, 3000, 0)
             pnl:NumSlider(L("combat_linger"), "outpost_war_combat_linger", 0, 60, 0)
+            pnl:NumSlider(L("corpse_time"), "outpost_war_corpse_time", 0, 300, 0)
             pnl:CheckBox(L("ignore_players"), "outpost_war_ignore_players")
             pnl:CheckBox(L("tint"), "outpost_war_tint")
             pnl:CheckBox(L("open_doors"), "outpost_war_open_doors")
@@ -123,4 +126,17 @@ hook.Add("PostDrawTranslucentRenderables", "OutpostWar_LeaderStar", function(_, 
             cam.End3D2D()
         end
     end
+end)
+
+---------------------------------------------------------------------------
+-- Уборка клиентских трупов NPC аванпостов (обычные HL2-NPC падают клиентским ragdoll-ом)
+---------------------------------------------------------------------------
+hook.Add("CreateClientsideRagdoll", "OutpostWar_Cleanup", function(ent, rag)
+    if not IsValid(ent) or ent:GetNWInt("OW_Team", -1) < 0 then return end
+    local cv = GetConVar("outpost_war_corpse_time")
+    local t = cv and cv:GetFloat() or 20
+    if t <= 0 then return end
+    timer.Simple(t, function()
+        if IsValid(rag) then rag:SetRenderMode(RENDERMODE_TRANSCOLOR) rag:Remove() end
+    end)
 end)

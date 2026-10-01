@@ -62,8 +62,18 @@ function OW.FindHome(team, pos)
 end
 
 -- Случайная точка на полу рядом с center
+-- Только на том же этаже, что и center: раньше точка у края балкона/площадки
+-- (луч вниз на 256) могла попасть на пол этажом ниже — и отряд шёл под аванпост.
+local function FloorZ(p)
+    local tr = util.TraceLine({ start = p + Vector(0, 0, 40), endpos = p - Vector(0, 0, 256),
+        mask = MASK_NPCSOLID_BRUSHONLY })
+    return (tr.Hit and not tr.StartSolid) and tr.HitPos.z or p.z
+end
+OW.FloorZ = FloorZ
+
 function OW.RandomPointNear(center, radius)
-    for _ = 1, 8 do
+    local cz = FloorZ(center)
+    for _ = 1, 12 do
         local a = math.Rand(0, math.pi * 2)
         local d = math.Rand(radius * 0.3, radius)
         local p = center + Vector(math.cos(a) * d, math.sin(a) * d, 0)
@@ -71,7 +81,7 @@ function OW.RandomPointNear(center, radius)
             start = p + Vector(0, 0, 64), endpos = p - Vector(0, 0, 256),
             mask = MASK_NPCSOLID_BRUSHONLY,
         })
-        if tr.Hit and not tr.StartSolid then
+        if tr.Hit and not tr.StartSolid and math.abs(tr.HitPos.z - cz) < math.max(48, d * 0.35) then  -- склон допустим, обрыв нет
             local vis = util.TraceHull({
                 start = center + Vector(0, 0, 40), endpos = tr.HitPos + Vector(0, 0, 40),
                 mins = Vector(-8, -8, -8), maxs = Vector(8, 8, 8),
@@ -89,7 +99,7 @@ end
 local cv_debug = OW.CVars.debug
 
 local function MoveSched(npc)
-    return npc.OW_UseWalk and SCHED_FORCED_GO or SCHED_FORCED_GO_RUN
+    return (npc.OW_UseWalk or (npc.OW_SlowWalk and npc.OW_Squad)) and SCHED_FORCED_GO or SCHED_FORCED_GO_RUN
 end
 
 -- NPC из VJ Base: свой ИИ на Lua, двигать их нужно функциями VJ Base
@@ -109,15 +119,23 @@ end
 -- VJ-NPC двигаем двумя способами по очереди: командой VJ Base и обычным приказом движка.
 -- По журналу команда VJ у некоторых NPC (Soviet Spetsnaz) не срабатывает вообще —
 -- после провала пробуем другой способ.
+-- Возвращает true, если приказ обновлён "на ходу" (без перезапуска расписания).
+-- По журналу: половина приказов выдавалась NPC, который уже бежал, и каждый SetSchedule
+-- перезапускал движение — NPC на миг вставал (act=1) и снова разгонялся: ходьба рывками.
 local function IssueMove(npc, target)
     npc:SetLastPosition(target)
     npc.OW_IssueTime = CurTime()
     if IsVJ(npc) and not npc.OW_VJEngine then
-        local task = npc.OW_UseWalk and "TASK_WALK_PATH" or "TASK_RUN_PATH"
-        if npc.SCHEDULE_GOTO_POSITION then npc:SCHEDULE_GOTO_POSITION(task) return end
-        if npc.VJ_TASK_GOTO_LASTPOS then npc:VJ_TASK_GOTO_LASTPOS(task) return end
+        local task = (npc.OW_UseWalk or (npc.OW_SlowWalk and npc.OW_Squad)) and "TASK_WALK_PATH" or "TASK_RUN_PATH"
+        if npc.SCHEDULE_GOTO_POSITION then npc:SCHEDULE_GOTO_POSITION(task) return false end
+        if npc.VJ_TASK_GOTO_LASTPOS then npc:VJ_TASK_GOTO_LASTPOS(task) return false end
     end
-    npc:SetSchedule(MoveSched(npc))
+    local sched = MoveSched(npc)
+    -- (v23-v24 пробовали менять цель "на ходу" через NavSetGoal — по журналу v24 это вело
+    -- NPC к ближайшему AI-ноду карты, т.е. куда-то в сторону, иногда на сотни юнитов назад.
+    -- Убрано.)
+    npc:SetSchedule(sched)
+    return false
 end
 
 local function StopMove(npc)
@@ -160,23 +178,30 @@ local function StepPoint(npc, goal, fails)
     local from = npc:GetPos()
     local dir = goal - from
     dir.z = 0
+    -- Короткие шаги, если NPC "уходит от точки": по журналу v26 на карте с AI-нодами движок
+    -- на 200+ юнитов часто ведёт NPC по нодам — сначала к ближайшему ноду, а он позади.
+    -- NPC раз за разом убегал ровно в обратную сторону. На 90 юнитов движок идёт напрямую.
+    local STEP = (npc.OW_AwayUntil or 0) > CurTime() and 90 or STEP
     if dir:Length() <= STEP then return goal end
 
     local baseYaw = dir:Angle().y
-    local jitter = math.min(fails * 15, 90)
+    -- раньше разброс доходил до 90° — NPC уходили вбок "без причины"
+    local jitter = math.min(fails * 8, 40)
     local mins, maxs = Vector(-16, -16, 20), Vector(16, 16, 64) -- z от 20: ступеньки не мешают
     local best, bestScore
 
     for _, off in ipairs({ 0, 25, -25, 50, -50, 80, -80, 115, -115 }) do
-        local yaw = baseYaw + off + math.Rand(-jitter, jitter)
+        local yaw = baseYaw + off + math.Rand(-jitter, jitter) * (off == 0 and 0.3 or 1)
         local fwd = Angle(0, yaw, 0):Forward()
         local tr = util.TraceHull({
             start = from, endpos = from + fwd * STEP,
             mins = mins, maxs = maxs, mask = MASK_NPCSOLID, filter = OW.WalkFilter,
         })
         local len = tr.Fraction * STEP
-        if len > 120 then
-            local p = FloorAt(from + fwd * (len - 32))
+        if len > STEP * 0.55 then
+            local p = FloorAt(from + fwd * math.max(len - 32, len * 0.7))
+            -- не спрыгивать этажом ниже (с балкона/площадки), если сама цель не ниже
+            if p and p.z < from.z - 64 and goal.z > from.z - 64 then p = nil end
             if p then
                 local score = len * math.cos(math.rad(yaw - baseYaw))
                 if not bestScore or score > bestScore then best, bestScore = p, score end
@@ -187,19 +212,104 @@ local function StepPoint(npc, goal, fails)
     return best or goal
 end
 
+-- "Дошёл до точки": близко по горизонтали И на том же уровне. Раньше считали просто
+-- расстояние — и NPC этажом ниже "доходил" до точки над потолком (до неё всего ~100-150).
+local function Reached(a, b, r)
+    return math.abs(a.z - b.z) < 64 and (a.x - b.x) ^ 2 + (a.y - b.y) ^ 2 < r * r
+end
+OW.Reached = Reached
+
 -- Прямой приказ: маршрут строит движок; если не смог — идём "шагами".
+-- Впереди (в сторону target, ближе 90) стоит другой NPC или игрок?
+-- По журналу: в толпе у лестницы/проёма движок сразу отказывается строить путь
+-- (провал, running=false) — проход занят своими. Раньше на это включались "шаги" в
+-- случайные стороны, и толпа расползалась (в т.ч. в соседние комнаты, линии "сквозь стену").
+local function CrowdAhead(npc, target)
+    local p = npc:GetPos()
+    local dir = target - p
+    dir.z = 0
+    if dir:LengthSqr() < 1 then return false end
+    dir:Normalize()
+    for _, e in ipairs(ents.FindInSphere(p, 90)) do
+        -- идущий впереди (движется) не помеха — за ним просто идём; ждём только стоящих
+        if e ~= npc and (e:IsNPC() or e:IsPlayer()) and (not e.Health or e:Health() > 0)
+           and e:GetVelocity():Length2DSqr() < 40 * 40 then
+            local d = e:GetPos() - p
+            d.z = 0
+            if d:LengthSqr() > 1 then
+                d:Normalize()
+                if d:Dot(dir) > 0.3 then return true end
+            end
+        end
+    end
+    return false
+end
+
 -- Вызывается каждый тик; сам решает, надо ли перевыдавать приказ.
 local function DirectMove(npc, pos, tolerance)
     tolerance = tolerance or 100
     local now = CurTime()
     local mypos = npc:GetPos()
+    -- ждём своей очереди в толпе / уступили манёвр боевому ИИ
+    if (npc.OW_WaitUntil or 0) > now then return end
+    if (npc.OW_YieldUntil or 0) > now then
+        npc.OW_SPos, npc.OW_STime = mypos, now   -- это не застревание
+        return
+    end
     local running = IsMoving(npc)
     local sameGoal = npc.OW_Goal ~= nil and npc.OW_Goal:DistToSqr(pos) < tolerance * tolerance
     local failed = false
 
+    -- Куда NPC ведёт движок на самом деле. По журналу v27 лидер бежал от точки даже при
+    -- шагах в 63 юнита — так не бывает при нашем приказе. Значит, цель движения подменяет
+    -- кто-то ещё: другой мод на ИИ (они часто используют те же SetLastPosition +
+    -- SCHED_FORCED_GO_RUN) или сам ИИ NPC. Проверяем цель навигации и пишем в журнал.
+    local overridden = false
+    if running and npc.OW_Target and npc.GetGoalPos and not IsVJ(npc) then
+        local gp = npc:GetGoalPos()
+        if gp and gp ~= vector_origin and gp:DistToSqr(npc.OW_Target) > 80 * 80 then
+            overridden = true
+            if (npc.OW_LastOverrideLog or 0) + 2 < now then
+                npc.OW_LastOverrideLog = now
+                Log(npc, string.format("ЦЕЛЬ ПОДМЕНЕНА: движок ведёт к [%d %d %d], а наша [%d %d %d]",
+                    gp.x, gp.y, gp.z, npc.OW_Target.x, npc.OW_Target.y, npc.OW_Target.z))
+            end
+        end
+    end
+    -- Совместимость с модами на боевой ИИ (Combat Intelligence AI и т.п.): по журналу v28
+    -- они 274 раза уводили NPC на свои манёвры (фланг, укрытие). Если рядом враг — это их
+    -- тактика: уступаем на 6 с и не перебиваем. Без врага — возвращаем свой приказ.
+    local en = npc.GetEnemy and npc:GetEnemy()
+    local enemyNear = IsValid(en) and en:GetPos():DistToSqr(mypos) < 2500 * 2500
+    if overridden and enemyNear then
+        npc.OW_YieldUntil = now + 6
+        Log(npc, "уступаю чужому боевому ИИ на 6 с")
+        return
+    end
+    if overridden then
+        -- выдаём свой приказ заново (без счёта провалов)
+        npc.OW_LastPos, npc.OW_LastMove, npc.OW_BestD = mypos, now, nil
+        IssueMove(npc, npc.OW_Target)
+        return
+    end
+
+    if running and npc.OW_Target then
+        -- Бежит, но УДАЛЯЕТСЯ от точки. По журналу v25: лидер с приказом "на 350 юнитов на юг"
+        -- бежал на север (y 4049 -> 6181) — движок вёл его своим путём по AI-нодам карты
+        -- в обход. Такое считаем провалом -> короткие "шаги" по прямой.
+        local d = mypos:Distance(npc.OW_Target)
+        npc.OW_BestD = math.min(npc.OW_BestD or d, d)
+        if d > npc.OW_BestD + 120 then
+            failed = true
+            Log(npc, string.format("уходит от точки: было %.0f, стало %.0f", npc.OW_BestD, d))
+            npc.OW_AwayUntil = now + 10     -- 10 с — короткие шаги по 90
+        end
+    end
     if running then
         -- Застрял: бежит, но почти не двигается 4 секунды
-        if not npc.OW_LastPos or mypos:DistToSqr(npc.OW_LastPos) > 30 * 30 then
+        if failed then
+            -- уже провал (уходит от точки)
+        elseif not npc.OW_LastPos or mypos:DistToSqr(npc.OW_LastPos) > 30 * 30 then
             npc.OW_LastPos, npc.OW_LastMove = mypos, now
         elseif now - (npc.OW_LastMove or now) > 4 then
             failed = true
@@ -208,24 +318,59 @@ local function DirectMove(npc, pos, tolerance)
         -- Приказ закончился, а до точки далеко -> маршрут не построился.
         -- (tolerance > 150 — например, точка строя: подойти "примерно" достаточно)
         local arrive = math.max(150, tolerance)
-        if mypos:DistToSqr(npc.OW_Target) > arrive * arrive then
+        local en = npc.GetEnemy and npc:GetEnemy()
+        if npc.OW_Retry then
+            npc.OW_Retry = nil          -- после ожидания в толпе — просто новый приказ
+        elseif not Reached(mypos, npc.OW_Target, arrive) and IsValid(en) and not IsVJ(npc) then
+            -- По журналу v24: приказ сбивал собственный боевой ИИ NPC (видит врага дальше
+            -- дистанции боя -> укрытие/перебежка, sched 51/92/97). Это не провал маршрута:
+            -- раньше тут включались "шаги" и NPC уходил вбок. Просто выдаём приказ снова.
+            if en:GetPos():DistToSqr(mypos) < 2500 * 2500 then
+                -- враг близко: это манёвр ИИ NPC / мода на ИИ — не мешаем 6 с
+                npc.OW_YieldUntil = now + 6
+                npc.OW_Retry = true
+                Log(npc, string.format("приказ сбит боевым ИИ (враг на %.0f) -> уступаю 6 с", mypos:Distance(en:GetPos())))
+                return
+            end
+            if (npc.OW_LastInterruptLog or 0) + 3 < now then
+                npc.OW_LastInterruptLog = now
+                Log(npc, string.format("приказ сбит боевым ИИ (враг на %.0f) -> повтор", mypos:Distance(en:GetPos())))
+            end
+        elseif not Reached(mypos, npc.OW_Target, arrive) then
             failed = true
         else
             npc.OW_Fail = 0
+            npc.OW_UseWalk = nil   -- дошли: снова бегом (раньше после 4 провалов NPC шёл шагом навсегда)
         end
     end
 
     if running and sameGoal and not failed then
         -- В режиме шагов выдаём следующий шаг, когда почти дошли до текущего
-        if not npc.OW_Stepping or mypos:DistToSqr(npc.OW_Target) > 90 * 90 then return end
+        local near = (npc.OW_AwayUntil or 0) > now and 45 or 90
+        if not npc.OW_Stepping or mypos:DistToSqr(npc.OW_Target) > near * near then return end
+    end
+
+    -- Провал из-за толпы впереди — не провал маршрута: ждём секунду и пробуем снова
+    if failed and npc.OW_Target and CrowdAhead(npc, npc.OW_Target) then
+        npc.OW_WaitUntil = now + math.Rand(0.6, 1.4)
+        npc.OW_LastWait = now
+        npc.OW_Retry = true
+        npc.OW_Goal, npc.OW_Target = pos, pos
+        -- пока ждём — смотрим туда, куда идём (а не назад на толпу)
+        if npc.SetIdealYawAndUpdate then
+            npc:SetIdealYawAndUpdate((npc.OW_Target - mypos):Angle().y)
+        end
+        Log(npc, "жду: впереди свои")
+        return
     end
 
     if failed then
-        Log(npc, string.format("провал #%d: running=%s, до точки %.0f", (npc.OW_Fail or 0) + 1,
-            tostring(running), npc.OW_Target and mypos:Distance(npc.OW_Target) or -1))
+        Log(npc, string.format("провал #%d: running=%s, до точки %.0f (по высоте %+.0f)", (npc.OW_Fail or 0) + 1,
+            tostring(running), npc.OW_Target and mypos:Distance(npc.OW_Target) or -1,
+            npc.OW_Target and (npc.OW_Target.z - mypos.z) or 0))
         npc.OW_Fail = (npc.OW_Fail or 0) + 1
         if IsVJ(npc) then npc.OW_VJEngine = not npc.OW_VJEngine end
-        npc.OW_StepUntil = now + 6                  -- 6 сек идём шагами
+        npc.OW_StepUntil = now + ((npc.OW_AwayUntil or 0) > now and 10 or 3)   -- сек идём шагами
         if npc.OW_Fail % 4 == 0 then npc.OW_UseWalk = not npc.OW_UseWalk end
     end
 
@@ -235,10 +380,12 @@ local function DirectMove(npc, pos, tolerance)
 
     npc.OW_Goal, npc.OW_Target = pos, target
     npc.OW_LastPos, npc.OW_LastMove = mypos, now
-    IssueMove(npc, target)
-    Log(npc, string.format("приказ: до точки %.0f%s%s, running до этого=%s, pos=%d %d", mypos:Distance(target),
+    npc.OW_BestD = nil
+    local smooth = IssueMove(npc, target)
+    Log(npc, string.format("приказ%s: до точки %.0f (по высоте %+.0f) [%d %d %d]%s%s, running до этого=%s, pos=%d %d %d",
+        smooth and " на ходу" or "", mypos:Distance(target), target.z - mypos.z, target.x, target.y, target.z,
         npc.OW_Stepping and " (шаг)" or "", IsVJ(npc) and (npc.OW_VJEngine and " [движок]" or " [VJ]") or "",
-        tostring(running), mypos.x, mypos.y))
+        tostring(running), mypos.x, mypos.y, mypos.z))
 end
 
 -- Отправить NPC к точке pos. Если далеко и на карте есть навмеш — идём по маршруту
@@ -257,7 +404,9 @@ local function Unstick(npc)
         npc.OW_SPos, npc.OW_STime = p, now
         return false
     end
-    if now - (npc.OW_STime or now) < 8 then return false end
+    -- в очереди (толпа впереди) терпим дольше, иначе отход разгоняет толпу по комнатам
+    local limit = (now - (npc.OW_LastWait or -100) < 3) and 20 or 8
+    if now - (npc.OW_STime or now) < limit then return false end
     npc.OW_STime = now
     for _ = 1, 10 do
         local dir = Angle(0, math.Rand(0, 360), 0):Forward()
@@ -289,7 +438,10 @@ function OW.MoveTo(npc, pos, tolerance)
 
     -- Близкую точку — напрямую; но если напрямую дважды не вышло (например, за забором
     -- и надо обойти через калитку), тоже строим маршрут по навмешу.
+    -- Точка на другом этаже (над потолком, внизу под балконом) — всегда по навмешу:
+    -- напрямую движок туда не дойдёт, а "шаги" идут прямо к ней — красная линия в потолок.
     local near = mypos:DistToSqr(pos) < PATH_MIN_DIST * PATH_MIN_DIST and (npc.OW_Fail or 0) < 2
+        and math.abs(pos.z - mypos.z) < 48
         and not npc.OW_Path
     if not (P and P.Available()) or near then
         npc.OW_Path, npc.OW_NoRoute = nil, nil
@@ -302,15 +454,27 @@ function OW.MoveTo(npc, pos, tolerance)
         or (path.wps[path.idx] and mypos:DistToSqr(path.wps[path.idx]) > 900 * 900)
 
     if need and now >= (npc.OW_NextRepath or 0) then
-        local status, res = P.Request(mypos, pos)
+        -- своя полоса у каждого NPC (постоянная, по номеру сущности): -1, -0.5, 0, 0.5, 1
+        npc.OW_Lane = npc.OW_Lane or ((npc:EntIndex() * 7) % 5 - 2) / 2
+        local status, res = P.Request(mypos, pos, npc.OW_Lane)
         if status == "pending" then
             npc.OW_NextRepath = now + 0.2
         elseif status == "ok" and #res > 0 then
             path = { goal = pos, wps = res, idx = 1 }
+            if cv_debug:GetInt() >= 2 then
+                local zs = {}
+                for i = 1, math.min(#res, 12) do zs[i] = string.format("%d", res[i].z) end
+                Log(npc, string.format("маршрут: %d точек, я z=%d, цель z=%d, z точек: %s; области старт/цель z=%s/%s",
+                    #res, mypos.z, pos.z, table.concat(zs, " "), tostring(P.LastStartZ), tostring(P.LastGoalZ)))
+            end
             npc.OW_Path, npc.OW_NoRoute, npc.OW_Fail = path, nil, 0
             npc.OW_NextRepath = now + 2
         else
             path = nil
+            if npc.OW_NoRouteReason ~= res then
+                Log(npc, string.format("нет маршрута: %s (я %d %d %d, цель %d %d %d)", tostring(res),
+                    mypos.x, mypos.y, mypos.z, pos.x, pos.y, pos.z))
+            end
             npc.OW_Path, npc.OW_NoRoute, npc.OW_NoRouteReason = nil, now, res
             npc.OW_NextRepath = now + 5
         end
@@ -325,10 +489,18 @@ function OW.MoveTo(npc, pos, tolerance)
     while path.idx < #path.wps do
         local wp = path.wps[path.idx]
         local d2 = mypos:DistToSqr(wp)
+        if math.abs(wp.z - mypos.z) > 64 then d2 = math.huge end   -- точка этажом выше/ниже — не дошли
         -- следующую точку выдаём заранее (за 120 юнитов), чтобы NPC не останавливался
         -- 160 — не меньше порога "дошёл" (150) в DirectMove. Раньше было 120: у стены/угла NPC
         -- (особенно VJ) вставал в ~140 от точки, считал её достигнутой, а маршрут не шёл дальше.
-        if d2 < 160 * 160 or (d2 < 220 * 220 and P.ClearWalk(mypos, path.wps[path.idx + 1])) then
+        -- На лестнице (точки на разной высоте) заранее не переключаемся: иначе NPC срезает
+        -- разворот лестницы и упирается в перила. Там — только когда реально дошёл
+        -- (48), или прямая до следующей точки свободна, или NPC уже остановился у точки.
+        local nxt = path.wps[path.idx + 1]
+        local stairs = math.abs(nxt.z - wp.z) > 24 or math.abs(wp.z - mypos.z) > 24
+        local clear = d2 < 220 * 220 and P.ClearWalk(mypos, nxt)
+        if stairs and clear and P.MaxDeviation({ mypos, wp, nxt }, 1, 3) > 40 then clear = false end
+        if d2 < 48 * 48 or clear or (d2 < 160 * 160 and (not stairs or not IsMoving(npc))) then
             path.idx = path.idx + 1
         else
             break
@@ -336,7 +508,7 @@ function OW.MoveTo(npc, pos, tolerance)
     end
 
     local wp = path.idx == #path.wps and pos or path.wps[path.idx]
-    if path.idx == #path.wps and mypos:DistToSqr(pos) < 150 * 150 then
+    if path.idx == #path.wps and Reached(mypos, pos, 150) then
         npc.OW_Path = nil   -- дошли: дальше снова напрямую
     end
     DirectMove(npc, wp, 30)
@@ -383,7 +555,12 @@ function OW.DebugDraw()
             if IsVJ(npc) then label = "[VJ] " .. label end
             if npc.OW_Stepping then label = label .. " (шаги)" end
             if (npc.OW_Fail or 0) > 0 then label = label .. " fail:" .. npc.OW_Fail end
-            if OW.IsFighting(npc) then label = label .. " БОЙ" end
+            if OW.IsFighting(npc) then
+                label = label .. " БОЙ"
+            elseif npc.GetEnemy and IsValid(npc:GetEnemy()) then
+                -- враг есть, но дальше дистанции боя: стреляет на ходу, марш не прерывает
+                label = label .. string.format(" (враг %.0f)", npc:GetPos():Distance(npc:GetEnemy():GetPos()))
+            end
             if npc.OW_Path then
                 label = label .. " (маршрут " .. npc.OW_Path.idx .. "/" .. #npc.OW_Path.wps .. ")"
                 local prev = npc:GetPos()
@@ -417,13 +594,28 @@ local function FightingRaw(npc)
     local d = npc:GetPos():DistToSqr(e:GetPos())
     -- в NPC недавно попали — отвечает огнём на любой дистанции
     local hurt = npc.OW_HurtTime and CurTime() - npc.OW_HurtTime < 3
-    if (d <= range * range or hurt) and (d < 600 * 600 or npc:Visible(e)) then
+    -- Свой бой NPC: в бою, когда его собственный ИИ может стрелять по врагу (оружие достаёт,
+    -- враг виден) — дистанцию решает игра/оружие, а не мод. Пока в бою, мод ничего не
+    -- приказывает, поэтому моды на тактику (фланги, укрытия) работают как обычно.
+    local native = OW.CVars.native_combat and OW.CVars.native_combat:GetBool() and not IsVJ(npc)
+        and npc.HasCondition and COND_CAN_RANGE_ATTACK1
+    if native then
+        local can = npc:HasCondition(COND_CAN_RANGE_ATTACK1)
+            or (COND_CAN_MELEE_ATTACK1 and npc:HasCondition(COND_CAN_MELEE_ATTACK1))
+            or (COND_CAN_RANGE_ATTACK2 and npc:HasCondition(COND_CAN_RANGE_ATTACK2))
+        if can or (hurt and npc:Visible(e)) or d < 400 * 400 then
+            npc.OW_LastCombat = CurTime()
+            return true
+        end
+    elseif (d <= range * range or hurt) and (d < 600 * 600 or npc:Visible(e)) then
         npc.OW_LastCombat = CurTime()
         return true
     end
     local linger = OW.CVars.combat_linger and OW.CVars.combat_linger:GetFloat() or 0
-    return npc.OW_LastCombat ~= nil and CurTime() - npc.OW_LastCombat < linger
-        and d <= (range * 1.3) ^ 2
+    -- в своём бою дистанцию не ограничиваем (дальнобойное оружие), только совсем далёкого врага
+    local lr = native and 3000 or range * 1.3
+    return npc.OW_LastCombat ~= nil and CurTime() - npc.OW_LastCombat < math.max(linger, native and 3 or 0)
+        and d <= lr * lr
 end
 
 function OW.IsFighting(npc)
@@ -445,7 +637,9 @@ end
 function OW.Engage(npc)
     local now = CurTime()
     local e = npc:GetEnemy()
-    if IsValid(e) and npc.OW_CombatSince and now - npc.OW_CombatSince > 5
+    -- в режиме "свой бой" рывков не делаем: тактика целиком на ИИ NPC (и модах на него)
+    local native = OW.CVars.native_combat and OW.CVars.native_combat:GetBool() and not IsVJ(npc)
+    if not native and IsValid(e) and npc.OW_CombatSince and now - npc.OW_CombatSince > 5
        and npc:GetPos():DistToSqr(e:GetPos()) > 600 * 600 then
         if not npc.OW_PushUntil and now >= (npc.OW_NextPush or 0) then
             local dir = e:GetPos() - npc:GetPos()
@@ -575,14 +769,75 @@ local function SafeFormationPoint(leader, offset)
     return lpos
 end
 
-local function FormationOffset(i, n)
-    local count = math.max(n - 1, 1)
-    local a = (i - 2) / count * math.pi * 2
-    local r = 90 + (i % 2) * 40
-    return Vector(math.cos(a) * r, math.sin(a) * r, 0)
+-- Строй "колонна по двое" ЗА ведущим.
+-- heading — направление марша. По журналу v23: направление брали из скорости/взгляда
+-- лидера, а они всё время скачут (поворот головы, шаг в сторону, бой) — точка строя
+-- прыгала с одной стороны на другую на 200-300 юнитов, и бойцы бегали "хрен пойми куда".
+-- Теперь для отряда NPC направление = к следующей точке маршрута лидера, сглаженное.
+local function FormationOffset(i, n, leader, heading)
+    local k = i - 2                         -- 0, 1, 2... — номер бойца за ведущим
+    local row = math.floor(k / 2) + 1
+    local side = (k % 2 == 0) and -1 or 1
+    local fwd = heading
+    if not fwd then
+        fwd = Vector(1, 0, 0)
+        if IsValid(leader) then
+            local v = leader:GetVelocity()
+            v.z = 0
+            if v:LengthSqr() > 60 * 60 then
+                fwd = v:GetNormalized()
+            else
+                local a = leader.EyeAngles and leader:EyeAngles() or leader:GetAngles()
+                fwd = Angle(0, a.y, 0):Forward()
+            end
+        end
+    end
+    local right = Vector(fwd.y, -fwd.x, 0)
+    return -fwd * (row * 70) + right * (side * 40)
 end
 OW.FormationOffset = FormationOffset
 OW.SafeFormationPoint = SafeFormationPoint
+
+-- Точка бойца №i в колонне по двое на следе лидера: ряд = 70 юнитов назад по следу,
+-- в ряду — левее/правее на 35 (если сбоку нет стены, иначе прямо на следе).
+function OW.TrailPoint(sq, i)
+    local leader = sq.members[1]
+    local k = i - 2
+    local row = math.floor(k / 2) + 1
+    local side = (k % 2 == 0) and -1 or 1
+    local want = row * 70
+    local trail = sq.trail or {}
+    local p, prev = leader:GetPos(), leader:GetPos()
+    local dir = Vector(0, 0, 0)
+    local walked = 0
+    for j = #trail, 1, -1 do
+        local q = trail[j]
+        local seg = prev:Distance(q)
+        if seg > 0.1 then
+            dir = prev - q
+            if walked + seg >= want then
+                p = LerpVector((want - walked) / seg, prev, q)
+                walked = want
+                break
+            end
+            walked = walked + seg
+            p = q
+        end
+        prev = q
+    end
+    dir.z = 0
+    if dir:LengthSqr() > 1 then
+        dir:Normalize()
+        local sidep = p + Vector(dir.y, -dir.x, 0) * (side * 35)
+        local tr = util.TraceHull({ start = p + Vector(0, 0, 4), endpos = sidep + Vector(0, 0, 4),
+            mins = HULL_MINS, maxs = HULL_MAXS, mask = MASK_NPCSOLID, filter = OW.WalkFilter })
+        if not tr.Hit then
+            local f = FloorAt(sidep)
+            if f and math.abs(f.z - p.z) < 24 then return f end
+        end
+    end
+    return p
+end
 
 function OW.SquadTick(sq)
     -- убираем мёртвых
@@ -605,6 +860,7 @@ function OW.SquadTick(sq)
         if IsValid(sq.leaderEnt) then sq.leaderEnt:SetNWBool("OW_Leader", false) end
         leader:SetNWBool("OW_Leader", true)
         sq.leaderEnt = leader
+        sq.trail = nil   -- новый лидер — новый след
     end
 
     -- Цель уже наша -> отряд становится её гарнизоном
@@ -661,23 +917,49 @@ function OW.SquadTick(sq)
             sq.waitSince = nil
         end
 
+        -- Отстали -> лидер идёт шагом (а не стоит: стоп-старт давал рывки всему отряду).
+        -- Совсем далеко (>1100) — ждёт на месте.
+        local slow = spread
+        if leader.OW_SlowWalk ~= slow then
+            leader.OW_SlowWalk = slow
+            leader.OW_Goal = nil                 -- перевыдать приказ с новым шагом
+        end
+        local far = false
+        if spread then
+            for i = 2, #sq.members do
+                if sq.members[i]:GetPos():DistToSqr(leader:GetPos()) > 1100 * 1100 then far = true break end
+            end
+        end
         if OW.IsFighting(leader) then
             OW.Engage(leader)
-        elseif spread then
+        elseif far then
             OW.Stop(leader)
         else
             OW.MoveTo(leader, sq.goal)
         end
 
         local lpos = leader:GetPos()
+        -- След лидера: точки, где он реально прошёл. Бойцы идут колонной ПО СЛЕДУ —
+        -- такие точки точно проходимы и не прыгают из стороны в сторону.
+        sq.trail = sq.trail or {}
+        local last = sq.trail[#sq.trail]
+        if not last or last:DistToSqr(lpos) > 30 * 30 then
+            table.insert(sq.trail, lpos)
+            if #sq.trail > 60 then table.remove(sq.trail, 1) end
+        end
         for i = 2, #sq.members do
             local m = sq.members[i]
             if OW.IsFighting(m) then
                 OW.Engage(m)
             else
-                local goal = SafeFormationPoint(leader, FormationOffset(i, #sq.members))
-                if m:GetPos():DistToSqr(goal) > 140 * 140 then
-                    OW.MoveTo(m, goal, 200)
+                local goal = OW.TrailPoint(sq, i)
+                -- пока лидер идёт — бойцы тоже идут (не стоп-старт у каждой точки)
+                local leaderMoving = leader:GetVelocity():Length2DSqr() > 40 * 40
+                local d2 = m:GetPos():DistToSqr(goal)
+                if d2 > 140 * 140 or (leaderMoving and d2 > 50 * 50) then
+                    -- далеко отстал — бегом, рядом — в темпе лидера
+                    m.OW_SlowWalk = leader.OW_SlowWalk and d2 < 300 * 300 or nil
+                    OW.MoveTo(m, goal, 180)   -- цель сдвинулась <180 — не перевыдаём (меньше рывков)
                 end
             end
         end
@@ -827,4 +1109,4 @@ concommand.Add("outpost_war_clear_npcs", function(ply)
     OW.NPCs, OW.Squads = {}, {}
 end)
 
-MsgN("[Outpost War] sv_outpost_war.lua загружен — движение v14")
+MsgN("[Outpost War] v" .. (OW.VERSION or "?") .. " загружен — движение v29")

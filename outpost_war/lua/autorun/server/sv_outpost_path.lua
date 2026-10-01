@@ -13,8 +13,13 @@ local OW = OutpostWar
 OW.Path = OW.Path or {}
 local P = OW.Path
 
-local MAX_CLIMB    = 40      -- подъём между соседними областями (ступеньки, склоны)
-local MAX_DROP     = 120     -- спуск (больше — это обрыв)
+-- Подъём между соседними областями. NPC шагают вверх только на ~18 (ступенька); прыгать
+-- не умеют. По журналу: маршрут шёл через уступ ~25-35 (nav_generate считает его
+-- проходимым для игрока), NPC стояли перед ним с бесконечными провалами.
+local MAX_CLIMB    = 22
+-- Спуск: NPC из HL2 не умеют спрыгивать с уступов (по журналу: точка в 85 юнитах и на 70 ниже —
+-- край балкона — бесконечные провалы). Поэтому спуск — только как по ступенькам/склону.
+local MAX_DROP     = 48
 local MAX_ITER     = 200000  -- лимит A*
 local FRAME_BUDGET = 0.003   -- сек процессорного времени на поиск за кадр
 local CACHE_TIME   = 30      -- сек, сколько хранится маршрут
@@ -47,9 +52,57 @@ function P.Available()
     return navmesh and navmesh.IsLoaded and navmesh.IsLoaded() and navmesh.GetNavAreaCount() > 0
 end
 
-local function NearestArea(pos)
-    return navmesh.GetNearestNavArea(pos, false, 500, false, true)
+-- Область навмеша на ТОМ ЖЕ этаже, что и pos.
+-- Раньше брали просто ближайшую (GetNearestNavArea): если точка на втором этаже/балконе,
+-- а прямо под ней пол первого этажа, иногда выбиралась нижняя область — маршрут вёл
+-- под точку, и NPC стояли этажом ниже ("до точки 170" в журнале бесконечно).
+local SAME_FLOOR = 60
+local function FloorDiff(area, pos)
+    return math.abs(area:GetZ(pos) - pos.z)
 end
+
+-- Список всех областей (обновляется, если навмеш поменялся)
+local ALL, ALL_COUNT = {}, -1
+local function AllAreas()
+    local n = navmesh.GetNavAreaCount()
+    if n ~= ALL_COUNT then
+        ALL, ALL_COUNT = {}, n
+        for _, a in ipairs(navmesh.GetAllNavAreas()) do
+            ALL[#ALL + 1] = { area = a, c = a:GetCenter(),
+                r2 = (math.max(a:GetSizeX(), a:GetSizeY()) / 2 + 300) ^ 2 }
+        end
+    end
+    return ALL
+end
+
+local NEAR_CACHE, NEAR_TIME = {}, 0
+local function NearestArea(pos)
+    -- 1) область прямо под точкой (её проекция содержит pos), не глубже 120 юнитов
+    local a = navmesh.GetNavArea(pos + Vector(0, 0, 20), 120)
+    if IsValid(a) and FloorDiff(a, pos) < SAME_FLOOR then return a end
+
+    -- 2) ближайшая область в радиусе 300, но только на том же уровне по высоте.
+    -- (navmesh.Find не годится: он ищет заливкой от области под точкой, а её как раз нет)
+    if CurTime() - NEAR_TIME > 20 then NEAR_CACHE, NEAR_TIME = {}, CurTime() end
+    local key = math.floor(pos.x / 32) .. "," .. math.floor(pos.y / 32) .. "," .. math.floor(pos.z / 32)
+    local c = NEAR_CACHE[key]
+    if c ~= nil then return c or nil end
+
+    local best, bestD
+    for _, e in ipairs(AllAreas()) do
+        local dx, dy = e.c.x - pos.x, e.c.y - pos.y
+        if dx * dx + dy * dy < e.r2 and IsValid(e.area) then
+            local cp = e.area:GetClosestPointOnArea(pos)
+            if cp and math.abs(cp.z - pos.z) < SAME_FLOOR then
+                local d = cp:DistToSqr(pos)
+                if d < 300 * 300 and (not bestD or d < bestD) then best, bestD = e.area, d end
+            end
+        end
+    end
+    NEAR_CACHE[key] = best or false
+    return best
+end
+P.NearestArea = NearestArea
 
 ---------------------------------------------------------------------------
 -- Двоичная куча
@@ -86,19 +139,49 @@ end
 ---------------------------------------------------------------------------
 -- Проходимость и стоимость
 ---------------------------------------------------------------------------
--- Перегорожен ли переход между областями пропом (забор, ворота, машина).
--- nav_generate пропы часто не учитывает и прокладывает навмеш сквозь сетчатый забор.
--- Проверяем три параллельные линии между центрами областей: забор перекрывает все три,
--- а случайная машина посреди большой области — обычно не все. Стены не проверяем —
--- их навмеш уже знает. Результат кэшируем на минуту.
+-- Проверка перехода между областями — см. EdgeBlocked ниже.
 local EDGE_CACHE, EDGE_TIME = {}, 0
-local EMINS, EMAXS = Vector(-12, -12, 20), Vector(12, 12, 56)
+local EMINS, EMAXS = Vector(-12, -12, 20), Vector(12, 12, 64)   -- до 64: и низкие балки
 
 local function PropFilter(e)
     if not OW.WalkFilter(e) then return false end
     return not e:IsWorld()
 end
 
+-- Середина общей границы областей (со сдвигом shift вдоль неё)
+local function EdgePortal(from, to, shift)
+    local f0, f2, t0, t2 = from:GetCorner(0), from:GetCorner(2), to:GetCorner(0), to:GetCorner(2)
+    local ox1, ox2 = math.max(math.min(f0.x, f2.x), math.min(t0.x, t2.x)), math.min(math.max(f0.x, f2.x), math.max(t0.x, t2.x))
+    local oy1, oy2 = math.max(math.min(f0.y, f2.y), math.min(t0.y, t2.y)), math.min(math.max(f0.y, f2.y), math.max(t0.y, t2.y))
+    local x, y
+    if ox2 - ox1 >= oy2 - oy1 then   -- граница вдоль X
+        x = math.Clamp((ox1 + ox2) / 2 + shift, ox1 + 4, math.max(ox1 + 4, ox2 - 4))
+        y = (oy1 + oy2) / 2
+    else                             -- граница вдоль Y
+        y = math.Clamp((oy1 + oy2) / 2 + shift, oy1 + 4, math.max(oy1 + 4, oy2 - 4))
+        x = (ox1 + ox2) / 2
+    end
+    local p = Vector(x, y, 0)
+    p.z = math.max(from:GetZ(p), to:GetZ(p))
+    return p
+end
+
+local function LegHit(a, b)
+    local tr = util.TraceHull({
+        start = a, endpos = b, mins = EMINS, maxs = EMAXS,
+        mask = MASK_NPCSOLID, filter = OW.WalkFilter,   -- стены мира И пропы
+    })
+    -- начали внутри чего-то (ящик стоит на центре области) — эту проверку не считаем
+    return tr.Hit and not tr.StartSolid
+end
+
+-- Перегорожен ли переход между областями.
+-- 1) Тонкие стены и балки: nav_generate (сетка ~25 юнитов) иногда соединяет области сквозь
+--    тонкую стенку/перегородку — маршрут шёл сквозь стену на поворотах.
+-- 2) Пропы (заборы, ворота): навмеш их часто не учитывает.
+-- Проверяем путь "центр области -> граница -> центр соседней" (он целиком внутри двух
+-- областей, поэтому настоящие углы комнат не мешают) в трёх местах границы. Заблокировано,
+-- только если перекрыты все три. Результат кэшируем на минуту.
 local function EdgeBlocked(from, to)
     if CurTime() - EDGE_TIME > 60 then EDGE_CACHE, EDGE_TIME = {}, CurTime() end
     local key = from:GetID() * 65536 + to:GetID()
@@ -106,23 +189,12 @@ local function EdgeBlocked(from, to)
     if c ~= nil then return c end
 
     local a, b = from:GetCenter(), to:GetCenter()
-    local dir = b - a
-    dir.z = 0
     local blocked = true
-    if dir:LengthSqr() < 1 then
-        blocked = false
-    else
-        dir:Normalize()
-        local side = Vector(-dir.y, dir.x, 0)
-        for _, off in ipairs({ 0, 28, -28 }) do
-            local tr = util.TraceHull({
-                start = a + side * off, endpos = b + side * off,
-                mins = EMINS, maxs = EMAXS, mask = MASK_NPCSOLID, filter = PropFilter,
-            })
-            if not (tr.Hit and IsValid(tr.Entity) and not tr.Entity:IsWorld()) then
-                blocked = false
-                break
-            end
+    for _, off in ipairs({ 0, 24, -24 }) do
+        local m = EdgePortal(from, to, off)
+        if not LegHit(a, m) and not LegHit(m, b) then
+            blocked = false
+            break
         end
     end
     EDGE_CACHE[key] = blocked
@@ -132,6 +204,8 @@ end
 local function CanTraverse(from, to)
     local dz = from:ComputeAdjacentConnectionHeightChange(to)
     if dz > MAX_CLIMB or dz < -MAX_DROP then return false end
+    if to:HasAttributes(NAV_MESH_JUMP or 2) then return false end   -- место "только прыжком"
+
     return not EdgeBlocked(from, to)
 end
 
@@ -231,7 +305,10 @@ local function Bounds(area)
 end
 
 -- Точка на общей границе областей a и b, с отступом от краёв прохода
-local function PortalPoint(a, b, prev)
+-- lane (-1..1) — своя "полоса" у каждого NPC: точка сдвигается поперёк прохода.
+-- Иначе все NPC идут через одну и ту же точку у угла проёма и толпятся в ней.
+local LANE_WIDTH = 40
+local function PortalPoint(a, b, prev, lane)
     local ax1, ax2, ay1, ay2 = Bounds(a)
     local bx1, bx2, by1, by2 = Bounds(b)
     local ox1, ox2 = math.max(ax1, bx1), math.min(ax2, bx2)
@@ -239,7 +316,12 @@ local function PortalPoint(a, b, prev)
     local x, y
 
     local function pick(v, lo, hi)
-        if hi - lo > EDGE_MARGIN * 2 then return math.Clamp(v, lo + EDGE_MARGIN, hi - EDGE_MARGIN) end
+        if hi - lo > EDGE_MARGIN * 2 then
+            lo, hi = lo + EDGE_MARGIN, hi - EDGE_MARGIN
+            local half = (hi - lo) / 2
+            local v0 = math.Clamp(v, lo, hi) + (lane or 0) * math.min(LANE_WIDTH, half)
+            return math.Clamp(v0, lo, hi)
+        end
         return (lo + hi) / 2
     end
 
@@ -280,10 +362,37 @@ function P.ClearWalk(a, b)
     for i = 1, steps do
         local p = LerpVector(i / (steps + 1), a, b)
         local f = FloorAt(p)
-        if not f or math.abs(f.z - p.z) > 40 then return false end
+        if not f or math.abs(f.z - p.z) > 24 then return false end   -- уступ выше ступеньки — не напрямую
     end
     return true
 end
+
+-- Насколько точки между i и j отходят от прямой i-j (по горизонтали)
+local function MaxDeviation(points, i, j)
+    local a, b = points[i], points[j]
+    local dx, dy = b.x - a.x, b.y - a.y
+    local len2 = dx * dx + dy * dy
+    local worst = 0
+    for k = i + 1, j - 1 do
+        local p = points[k]
+        local t = len2 > 0 and math.Clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / len2, 0, 1) or 0
+        local ex, ey = a.x + dx * t - p.x, a.y + dy * t - p.y
+        worst = math.max(worst, math.sqrt(ex * ex + ey * ey))
+    end
+    return worst
+end
+
+-- Срезать угол можно, если прямая свободна. Но на лестницах с разворотом (пролёт,
+-- площадка, пролёт обратно) прямая от нижнего пролёта к верхнему проходит над
+-- перилами/пролётом — поэтому если высота меняется, точки не должны далеко отходить от прямой.
+local function CanShortcut(points, i, j)
+    if points[i]:Distance(points[j]) > MAX_SEGMENT then return false end
+    if math.abs(points[i].z - points[j].z) > 24 or math.abs(points[i + 1].z - points[i].z) > 24 then
+        if MaxDeviation(points, i, j) > 40 then return false end
+    end
+    return P.ClearWalk(points[i], points[j])
+end
+P.MaxDeviation = MaxDeviation
 
 local function Smooth(points)
     if #points <= 2 then return points end
@@ -292,7 +401,7 @@ local function Smooth(points)
     while i < #points do
         local best = i + 1
         for j = math.min(#points, i + 8), i + 2, -1 do
-            if points[i]:Distance(points[j]) <= MAX_SEGMENT and P.ClearWalk(points[i], points[j]) then
+            if CanShortcut(points, i, j) then
                 best = j
                 break
             end
@@ -303,11 +412,11 @@ local function Smooth(points)
     return out
 end
 
-local function BuildPoints(areas, from, to)
+local function BuildPoints(areas, from, to, lane)
     local points = { from }
     local prev = from
     for i = 2, #areas do
-        local p = PortalPoint(areas[i - 1], areas[i], prev)
+        local p = PortalPoint(areas[i - 1], areas[i], prev, lane)
         table.insert(points, p)
         prev = p
     end
@@ -332,17 +441,18 @@ end
 -- Запрос маршрута.
 -- Возвращает: "ok", точки | "pending" | "fail", причина
 ---------------------------------------------------------------------------
-function P.Request(from, to)
+function P.Request(from, to, lane)
     if not P.Available() then return "fail", "на карте нет навмеша" end
     local a, b = NearestArea(from), NearestArea(to)
     if not IsValid(a) then return "fail", "рядом с NPC нет навмеша" end
     if not IsValid(b) then return "fail", "рядом с целью нет навмеша" end
 
+    P.LastStartZ, P.LastGoalZ = math.floor(a:GetZ(from)), math.floor(b:GetZ(to))
     local key = a:GetID() .. ">" .. b:GetID()
     local cached = P.Cache[key]
     if cached and CurTime() - cached.time < CACHE_TIME then
         if not cached.areas then return "fail", cached.reason end
-        return "ok", BuildPoints(cached.areas, from, to)
+        return "ok", BuildPoints(cached.areas, from, to, lane)
     end
 
     if not P.Jobs[key] then
