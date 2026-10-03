@@ -4,7 +4,7 @@ AddCSLuaFile()
 
 OutpostWar = OutpostWar or {}
 local OW = OutpostWar
-OW.VERSION = "1.1.0"   -- показывается в меню инструмента и настроек
+OW.VERSION = "1.4.0"   -- показывается в меню инструмента и настроек
 
 -- Серверные настройки. REPLICATED — чтобы клиент видел значения в меню настроек.
 local CV_FLAGS = bit.bor(FCVAR_ARCHIVE, FCVAR_REPLICATED, FCVAR_NOTIFY)

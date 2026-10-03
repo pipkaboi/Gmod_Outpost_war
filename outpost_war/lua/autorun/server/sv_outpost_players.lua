@@ -29,6 +29,9 @@ function OW.RelatePlayer(npc, ply)
         disp = npc.OW_PlyDefault[ply]
     end
     npc:AddEntityRelationship(ply, disp, 99)
+    -- VJ Base: жёсткое переопределение в его памяти отношений (иначе VJ пересчитывает сам,
+    -- а при зове союзников на помощь может навсегда записать игрока во враги)
+    if OW.VJOverride then OW.VJOverride(npc, ply, t > 0 and disp or (OW.CVars.ignore_players:GetBool() and D_NU or nil)) end
     -- если игрок больше не враг — NPC сразу забывает про него, а не после смены цели
     if disp ~= D_HT and disp ~= D_FR then
         if npc:GetEnemy() == ply then npc:SetEnemy(NULL) end
@@ -37,9 +40,69 @@ function OW.RelatePlayer(npc, ply)
 end
 
 
+-- VJ Base не слушает AddEntityRelationship: он сам каждые полсекунды пересчитывает отношения
+-- по классам VJ_NPC_Class — и у NPC, и у игроков (так работает и инструмент VJ для игроков).
+-- Поэтому игроку ставим класс его команды: VJ-NPC той же команды считают его своим.
+-- Вне команды при "NPC не трогают игроков" — классы всех команд (VJ-NPC аванпостов
+-- считают его союзником = не трогают). Иначе — возвращаем то, что было до мода.
+function OW.UpdatePlayerVJ(ply)
+    if not IsValid(ply) then return end
+    if ply.OW_VJSaved == nil then ply.OW_VJSaved = ply.VJ_NPC_Class or false end
+    local t = OW.PlayerTeam(ply)
+    if t > 0 then
+        ply.VJ_NPC_Class = { "CLASS_OUTPOST_TEAM_" .. t }
+    elseif OW.CVars.ignore_players:GetBool() then
+        local all = {}
+        for i = 0, 20 do all[#all + 1] = "CLASS_OUTPOST_TEAM_" .. i end
+        ply.VJ_NPC_Class = all
+    else
+        ply.VJ_NPC_Class = ply.OW_VJSaved or nil
+    end
+end
+
+-- Каким должно быть отношение NPC к игроку (nil = не трогаем, родное)
+local function WantedDisp(npc, ply)
+    local t = OW.PlayerTeam(ply)
+    if t > 0 then return (npc.OW_Team == t) and D_LI or D_HT end
+    if OW.CVars.ignore_players:GetBool() then return D_NU end
+end
+
+-- Раз в секунду: кто-то (ИИ отряда, VJ Base, другие моды) мог перезаписать отношение
+-- к игроку — возвращаем нужное и сбрасываем "лишнюю" агрессию. Пишем в журнал, кто сбил.
+function OW.EnforcePlayers()
+    local now = CurTime()
+    if now < (OW.NextPlayerEnforce or 0) then return end
+    OW.NextPlayerEnforce = now + 1
+    for _, ply in ipairs(player.GetAll()) do
+        if IsValid(ply) then
+            for npc in pairs(OW.NPCs) do
+                if IsValid(npc) and npc:IsNPC() and not npc.OW_Passive then
+                    local want = WantedDisp(npc, ply)
+                    if want and want ~= D_HT then
+                        local cur = npc:Disposition(ply)
+                        local hostile = npc.GetEnemy and npc:GetEnemy() == ply
+                        if cur ~= want or hostile then
+                            if OW.Log then
+                                OW.Log(npc, string.format("отношение к игроку %s сбито (было %s, враг=%s) -> восстановлено",
+                                    ply:Nick(), tostring(cur), tostring(hostile)))
+                            end
+                            OW.RelatePlayer(npc, ply)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
 local function RelateAll(ply)
+    OW.UpdatePlayerVJ(ply)
     for npc in pairs(OW.NPCs) do OW.RelatePlayer(npc, ply) end
 end
+
+hook.Add("PlayerInitialSpawn", "OutpostWar_VJ", function(ply)
+    timer.Simple(1, function() if IsValid(ply) then RelateAll(ply) end end)
+end)
 
 -- Галочка "NPC не трогают игроков" применяется сразу ко всем NPC, а не только к новым
 cvars.AddChangeCallback("outpost_war_ignore_players", function()

@@ -151,6 +151,7 @@ local function Log(npc, msg)
     if cv_debug:GetInt() < 2 then return end
     local role = npc.OW_Squad and ("отряд " .. npc.OW_Squad.id .. (npc.OW_Squad.members[1] == npc and " лидер" or ""))
         or (npc.OW_Role or "?")
+    role = "к" .. tostring(npc.OW_Team) .. " " .. role
     local line = string.format("[%.1f] #%d %s (%s) act=%s sched=%s: %s\n", CurTime(), npc:EntIndex(),
         npc:GetClass(), role, tostring(npc:GetActivity()), tostring(npc:GetCurrentSchedule()), msg)
     file.Append("outpost_war_log.txt", line)
@@ -588,8 +589,13 @@ end
 local function FightingRaw(npc)
     if not npc.GetEnemy then return false end
     local e = npc:GetEnemy()
-    if not IsValid(e) then return false end
-    if e.Health and e:Health() <= 0 then return false end
+    -- Врага больше нет (убит / потерян ИИ): боевая готовность ещё combat_linger секунд —
+    -- NPC остаётся под своим ИИ (осматривается, добивает, ищет), марш не возобновляется.
+    -- Раньше бой заканчивался сразу, как только ИИ сбрасывал врага.
+    if not IsValid(e) or (e.Health and e:Health() <= 0) then
+        local linger = OW.CVars.combat_linger and OW.CVars.combat_linger:GetFloat() or 0
+        return npc.OW_LastCombat ~= nil and CurTime() - npc.OW_LastCombat < linger
+    end
     local range = OW.CVars.engage_dist and OW.CVars.engage_dist:GetFloat() or 800
     local d = npc:GetPos():DistToSqr(e:GetPos())
     -- в NPC недавно попали — отвечает огнём на любой дистанции
@@ -599,6 +605,21 @@ local function FightingRaw(npc)
     -- приказывает, поэтому моды на тактику (фланги, укрытия) работают как обычно.
     local native = OW.CVars.native_combat and OW.CVars.native_combat:GetBool() and not IsVJ(npc)
         and npc.HasCondition and COND_CAN_RANGE_ATTACK1
+    -- VJ Base: в "своём бою" решает сам VJ. Если ИИ VJ выбрал врага (у него своя дальность
+    -- зрения и свои правила) — NPC в бою, мод не вмешивается. Никаких наших дистанций.
+    -- Но VJ помнит врага и "знает" где он даже сквозь стены: без AI-нод VJ-NPC не может к
+    -- нему пройти и просто стоит, глядя в стену. Поэтому бой — только когда VJ реально
+    -- ВИДИТ врага в пределах СВОЕЙ дальности зрения (SightDistance VJ), враг вплотную или в
+    -- NPC попали. Иначе — после боевой готовности мод снова ведёт его по маршруту.
+    if IsVJ(npc) and OW.CVars.native_combat and OW.CVars.native_combat:GetBool() then
+        local sight = tonumber(npc.SightDistance) or 10000
+        if (d <= sight * sight and npc:Visible(e)) or d < 250 * 250 or hurt then
+            npc.OW_LastCombat = CurTime()
+            return true
+        end
+        local linger = OW.CVars.combat_linger and OW.CVars.combat_linger:GetFloat() or 0
+        return npc.OW_LastCombat ~= nil and CurTime() - npc.OW_LastCombat < linger
+    end
     if native then
         local can = npc:HasCondition(COND_CAN_RANGE_ATTACK1)
             or (COND_CAN_MELEE_ATTACK1 and npc:HasCondition(COND_CAN_MELEE_ATTACK1))
@@ -623,7 +644,8 @@ function OW.IsFighting(npc)
     if f and not npc.OW_CombatSince then
         npc.OW_CombatSince = CurTime()
         local e = npc:GetEnemy()
-        Log(npc, string.format("БОЙ начат: враг %s на %.0f, виден=%s", IsValid(e) and e:GetClass() or "?",
+        Log(npc, string.format("БОЙ начат: враг %s (к%s) на %.0f, виден=%s", IsValid(e) and e:GetClass() or "?",
+            IsValid(e) and tostring(e.OW_Team or (e.IsPlayer and e:IsPlayer() and e:GetNWInt("OW_Team", 0)) or "-") or "?",
             IsValid(e) and npc:GetPos():Distance(e:GetPos()) or -1, tostring(IsValid(e) and npc:Visible(e))))
     elseif not f and npc.OW_CombatSince then
         Log(npc, string.format("БОЙ окончен через %.1f с", CurTime() - npc.OW_CombatSince))
@@ -637,6 +659,19 @@ end
 function OW.Engage(npc)
     local now = CurTime()
     local e = npc:GetEnemy()
+    -- VJ Base сам подходит к врагу и атакует (рыцари, монстры ближнего боя). Раньше мод каждые
+    -- полсекунды вызывал StopMoving() — VJ-NPC стояли и смотрели на врага издалека.
+    -- Теперь: один раз снимаем наш приказ движения и дальше не мешаем.
+    if IsVJ(npc) then
+        if npc.OW_Goal or npc.OW_Target then
+            if npc:IsCurrentSchedule(SCHED_FORCED_GO_RUN) or npc:IsCurrentSchedule(SCHED_FORCED_GO) then
+                if npc.ClearSchedule then npc:ClearSchedule() end
+            end
+            npc.OW_Goal, npc.OW_Target, npc.OW_Path = nil, nil, nil
+            Log(npc, "VJ: бой отдан ИИ VJ Base")
+        end
+        return
+    end
     -- в режиме "свой бой" рывков не делаем: тактика целиком на ИИ NPC (и модах на него)
     local native = OW.CVars.native_combat and OW.CVars.native_combat:GetBool() and not IsVJ(npc)
     if not native and IsValid(e) and npc.OW_CombatSince and now - npc.OW_CombatSince > 5
@@ -661,12 +696,28 @@ end
 ---------------------------------------------------------------------------
 -- Регистрация и отношения
 ---------------------------------------------------------------------------
+-- Отношение VJ-NPC к сущности: VJ Base (ai/core.lua, MaintainRelationships) берёт его из
+-- RelationshipMemory[ent]["override_disposition"] раньше всех своих правил (классы, союзники).
+-- disp = nil — снять переопределение (VJ решает сам).
+function OW.VJOverride(npc, ent, disp)
+    if not (IsValid(npc) and npc.IsVJBaseSNPC and npc.SetRelationshipMemory and npc.RelationshipMemory) then return end
+    local key = (VJ and VJ.MEM_OVERRIDE_DISPOSITION) or "override_disposition"
+    npc:SetRelationshipMemory(ent, key, disp)
+    if disp and disp ~= D_HT and npc.GetEnemy and npc:GetEnemy() == ent and npc.ResetEnemy then
+        npc:ResetEnemy(true, false)
+    end
+end
+
 function OW.SetupRelationships(npc)
     for other in pairs(OW.NPCs) do
         if other ~= npc and IsValid(other) and other:IsNPC() then
             local disp = (other.OW_Team == npc.OW_Team) and D_LI or D_HT
             npc:AddEntityRelationship(other, disp, 99)
             other:AddEntityRelationship(npc, disp, 99)
+            -- VJ Base не слушает AddEntityRelationship: у него своя "память отношений".
+            -- Ставим жёсткое переопределение (то же делает меню VJ "сделать союзником").
+            OW.VJOverride(npc, other, disp)
+            OW.VJOverride(other, npc, disp)
         end
     end
     -- Отношения с игроками (команда игрока / нейтральность) — sv_outpost_players.lua
@@ -684,10 +735,17 @@ function OW.Register(npc, outpost)
         OW.NPCs[npc] = true
         return
     end
+    -- Класс команды для VJ Base ставим ВСЕМ NPC аванпоста, не только VJ: VJ сравнивает свой
+    -- класс с VJ_NPC_Class других. Без этого VJ считал обычных NPC своей команды (комбайнов)
+    -- врагами по их родному классу и убивал их.
+    npc.VJ_NPC_Class = { "CLASS_OUTPOST_TEAM_" .. outpost:GetOPTeam() }
+    npc.OW_Team = outpost:GetOPTeam()
     if IsVJ(npc) then
-        -- VJ Base определяет своих/чужих по собственным классам
-        npc.VJ_NPC_Class = { "CLASS_OUTPOST_TEAM_" .. outpost:GetOPTeam() }
         npc.DisableWandering = true
+        -- своё "дружит со всеми игроками" у VJ-NPC отключаем: кто свой — решает команда
+        -- (класс игрока выставляет OW.UpdatePlayerVJ)
+        npc.PlayerFriendly = false
+        npc.FriendsWithAllPlayerAllies = false
     end
     npc.OW_Team = outpost:GetOPTeam()
     npc.OW_Home = outpost
@@ -695,9 +753,10 @@ function OW.Register(npc, outpost)
     npc.OW_ReserveSince = CurTime()
     npc.OW_SpawnClass = outpost:GetNPCClass()
     npc.OW_SpawnWeapon = outpost:GetNPCWeapon()
+    npc.OW_SpawnMix = outpost.GetMix and outpost:GetMix() or ""
     npc:SetNWInt("OW_Team", npc.OW_Team)
     OW.TeamSpawn = OW.TeamSpawn or {}
-    OW.TeamSpawn[npc.OW_Team] = { class = npc.OW_SpawnClass, weapon = npc.OW_SpawnWeapon }
+    OW.TeamSpawn[npc.OW_Team] = { class = npc.OW_SpawnClass, weapon = npc.OW_SpawnWeapon, mix = npc.OW_SpawnMix }
     OW.SetupRelationships(npc)
     OW.NPCs[npc] = true
 end
@@ -1075,12 +1134,30 @@ end
 ---------------------------------------------------------------------------
 -- Главный цикл
 ---------------------------------------------------------------------------
+-- Свои не должны воевать со своими. VJ Base сам решает, кто враг (и заставляет обычных NPC
+-- отвечать ему тем же), поэтому каждый тик проверяем: если враг — NPC своей команды,
+-- сбрасываем его и снова ставим "друг".
+local function FixFriendlyFire(npc)
+    if not npc.GetEnemy then return end
+    local e = npc:GetEnemy()
+    if IsValid(e) and e.OW_Team ~= nil and e.OW_Team == npc.OW_Team and e ~= npc then
+        npc:AddEntityRelationship(e, D_LI, 99)
+        if e.AddEntityRelationship and e:IsNPC() then e:AddEntityRelationship(npc, D_LI, 99) end
+        npc:SetEnemy(NULL)
+        if npc.ClearEnemyMemory then npc:ClearEnemyMemory(e) end
+        OW.VJOverride(npc, e, D_LI)
+        Log(npc, "враг был из своей команды (" .. e:GetClass() .. ") -> сброшен")
+    end
+end
+
 function OW.Tick()
     for npc in pairs(OW.NPCs) do
-        if not OW.IsAlive(npc) then OW.NPCs[npc] = nil end
+        if not OW.IsAlive(npc) then OW.NPCs[npc] = nil
+        elseif not npc.OW_Passive then FixFriendlyFire(npc) end
     end
 
     if OW.PlayersTick then OW.PlayersTick() end   -- набор бойцов в отряды игроков
+    if OW.EnforcePlayers then OW.EnforcePlayers() end
 
     for _, op in ipairs(OW.GetOutposts()) do
         if op.BrainTick then op:BrainTick() end
@@ -1109,4 +1186,11 @@ concommand.Add("outpost_war_clear_npcs", function(ply)
     OW.NPCs, OW.Squads = {}, {}
 end)
 
-MsgN("[Outpost War] v" .. (OW.VERSION or "?") .. " загружен — движение v29")
+-- Кнопка "По умолчанию" в Server Settings: все серверные настройки мода — к значениям по умолчанию
+concommand.Add("outpost_war_reset_settings", function(ply)
+    if IsValid(ply) and not ply:IsAdmin() then return end
+    for _, cv in pairs(OW.CVars) do cv:Revert() end
+    MsgN("[Outpost War] настройки сброшены по умолчанию")
+end)
+
+MsgN("[Outpost War] v" .. (OW.VERSION or "?") .. " загружен — движение v30")

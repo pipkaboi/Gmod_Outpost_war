@@ -23,6 +23,24 @@ function ENT:SetupDataTables()
     self:NetworkVar("Float", 2, "SpawnDelay")
     self:NetworkVar("String", 0, "NPCClass")
     self:NetworkVar("String", 1, "NPCWeapon")
+    self:NetworkVar("String", 2, "Mix")   -- смесь NPC: "класс,оружие,вес;класс,оружие,вес"
+end
+
+-- Разбор смеси NPC. Неизвестные NPC и странное оружие отбрасываются.
+function OutpostWar.ParseMix(str)
+    local out = {}
+    if not isstring(str) or str == "" then return out end
+    local npcs = list.Get("NPC")
+    for part in string.gmatch(str, "[^;]+") do
+        local cls, wep, w = string.match(part, "^%s*([^,]+),([^,]*),(%d+)%s*$")
+        w = tonumber(w)
+        if cls and npcs[cls] and w and w > 0 then
+            if wep ~= "default" and wep ~= "none" and not string.StartWith(wep, "weapon_") then wep = "default" end
+            out[#out + 1] = { npc = cls, weapon = wep, weight = math.min(w, 100) }
+            if #out >= 16 then break end
+        end
+    end
+    return out
 end
 
 -- Аванпост исчерпал лимит NPC
@@ -37,7 +55,7 @@ if SERVER then
     local DEFAULTS = {
         team = 1, npc = "npc_combine_s", weapon = "default",
         max_npcs = 10, spawn_delay = 15, squad_size = 4, garrison = 2, radius = 300,
-        spawn_limit = 0,
+        spawn_limit = 0, mix = "",
     }
 
     function ENT:Initialize()
@@ -64,6 +82,8 @@ if SERVER then
         self:SetGarrison(math.Clamp(math.floor(get("garrison")), 0, 20))
         self:SetCapRadius(math.Clamp(get("radius"), 100, 2000))
         self:SetSpawnLimit(math.Clamp(math.floor(get("spawn_limit")), 0, 10000))
+        self:SetMix(get("mix") or "")
+        self.OW_Mix = OW.ParseMix(self:GetMix())
         self:SetSpawnedTotal(0)   -- новые настройки = счётчик заново
         self:UpdateColor()
     end
@@ -111,7 +131,18 @@ if SERVER then
         local team = self:GetOPTeam()
         if team == 0 or self:IsDepleted() then return end
 
-        local key = self:GetNPCClass()
+        -- Смесь: случайный NPC из рецепта с учётом долей; иначе — один тип
+        local key, wep = self:GetNPCClass(), self:GetNPCWeapon()
+        local mix = self.OW_Mix
+        if mix and #mix > 0 then
+            local total = 0
+            for _, m in ipairs(mix) do total = total + m.weight end
+            local r = math.random() * total
+            for _, m in ipairs(mix) do
+                r = r - m.weight
+                if r <= 0 then key, wep = m.npc, m.weapon break end
+            end
+        end
         local data = list.Get("NPC")[key]
         local class = data and data.Class or key
 
@@ -143,7 +174,6 @@ if SERVER then
         npc:SetKeyValue("squadname", "ow_home_" .. self:EntIndex() .. "_" .. math.floor(self.OW_SquadCounter / 8))
 
         -- Оружие
-        local wep = self:GetNPCWeapon()
         if wep == "default" or wep == "" then
             if data and data.Weapons and #data.Weapons > 0 then
                 npc:SetKeyValue("additionalequipment", table.Random(data.Weapons))
@@ -349,10 +379,14 @@ if SERVER then
         if IsValid(byNPC) and byNPC.OW_SpawnClass then
             self:SetNPCClass(byNPC.OW_SpawnClass)
             self:SetNPCWeapon(byNPC.OW_SpawnWeapon or "default")
+            self:SetMix(byNPC.OW_SpawnMix or "")
+            self.OW_Mix = OW.ParseMix(self:GetMix())
         elseif OW.TeamSpawn and OW.TeamSpawn[team] then
             -- захватили игроки: берём NPC, которых эта команда спавнит на других аванпостах
             self:SetNPCClass(OW.TeamSpawn[team].class)
             self:SetNPCWeapon(OW.TeamSpawn[team].weapon)
+            self:SetMix(OW.TeamSpawn[team].mix or "")
+            self.OW_Mix = OW.ParseMix(self:GetMix())
         end
         self:SetCapProgress(0)
         self:SetCapTeam(0)

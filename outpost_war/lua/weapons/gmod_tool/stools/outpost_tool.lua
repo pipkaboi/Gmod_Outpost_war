@@ -15,6 +15,8 @@ TOOL.ClientConVar = {
     garrison    = "2",
     radius      = "300",
     spawn_limit = "0",
+    mix         = "",    -- смесь NPC (рецепт): "класс,оружие,вес;..."; пусто = один тип выше
+    mix_weight  = "1",   -- доля для следующей добавляемой строки
 }
 
 TOOL.Information = {
@@ -44,6 +46,7 @@ function TOOL:GetSettings()
         garrison    = self:GetClientNumber("garrison", 2),
         radius      = self:GetClientNumber("radius", 300),
         spawn_limit = self:GetClientNumber("spawn_limit", 0),
+        mix         = self:GetClientInfo("mix"),
     }
 end
 
@@ -88,10 +91,42 @@ function TOOL:Reload(tr)
     return true
 end
 
+-- Значения по умолчанию всех настроек инструмента (для пресетов и кнопки "По умолчанию")
+local ConVarsDefault = TOOL:BuildConVarList()
+
 function TOOL.BuildCPanel(pnl)
     local L = OutpostWar.L
     pnl:Help("Outpost War v" .. (OutpostWar.VERSION or "?"))
     pnl:Help(L("tool_help"))
+
+    -- Пресеты (рецепты аванпостов): стандартный список GMod с кнопками "+" (сохранить
+    -- текущие настройки под именем) и "-" (удалить). Хранятся у игрока в
+    -- garrysmod/settings/presets/outpost_tool.txt
+    local presets = pnl:AddControl("ComboBox", {
+        MenuButton = 1,
+        Folder = "outpost_tool",
+        Options = { ["#preset.default"] = ConVarsDefault },
+        CVars = table.GetKeys(ConVarsDefault),
+    })
+    -- Пресет задаёт только те настройки, что в нём сохранены. В пресетах, сделанных до
+    -- появления смеси, её нет — и смесь от прошлого пресета "прилипала" ко всем.
+    -- Чего в пресете нет — берём по умолчанию (смесь пустая).
+    if IsValid(presets) and presets.OnSelect then
+        local orig = presets.OnSelect
+        presets.OnSelect = function(self, index, value, data)
+            if istable(data) then
+                for cv, def in pairs(ConVarsDefault) do
+                    if data[cv] == nil then RunConsoleCommand(cv, def) end
+                end
+            end
+            return orig(self, index, value, data)
+        end
+    end
+    pnl:ControlHelp(L("presets_help"))
+    local reset = pnl:Button(L("reset_defaults"))
+    reset.DoClick = function()
+        for cv, val in pairs(ConVarsDefault) do RunConsoleCommand(cv, val) end
+    end
 
     pnl:NumSlider(L("team"), "outpost_tool_team", 0, 10, 0)
 
@@ -152,6 +187,88 @@ function TOOL.BuildCPanel(pnl)
         FillWeapons(key)
     end
     wepBox.OnSelect = function(_, _, _, cls) RunConsoleCommand("outpost_tool_weapon", cls) end
+
+    -- Пресет или "По умолчанию" меняют консольные переменные — списки NPC/оружия
+    -- должны показать новый выбор (ползунки обновляются сами)
+    local function SelectByData(box, val)
+        for i, d in pairs(box.Data or {}) do
+            if d == val then box:ChooseOptionID(i) return end
+        end
+    end
+    cvars.AddChangeCallback("outpost_tool_npc", function(_, _, new)
+        if not IsValid(npcBox) then return end
+        SelectByData(npcBox, new)
+        timer.Simple(0, function()   -- оружие могло смениться тем же пресетом
+            if IsValid(wepBox) then FillWeapons(new) end
+        end)
+    end, "OutpostWar_NpcBox")
+    cvars.AddChangeCallback("outpost_tool_weapon", function(_, _, new)
+        if IsValid(wepBox) then SelectByData(wepBox, new) end
+    end, "OutpostWar_WepBox")
+
+    -- Смесь NPC: несколько строк "NPC + оружие + доля". Аванпост спавнит их вперемешку.
+    -- Хранится в outpost_tool_mix и сохраняется в пресетах вместе с остальным.
+    -- (до 8 строк: длина клиентской настройки ограничена движком)
+    pnl:Help(L("mix_title"))
+    pnl:NumSlider(L("mix_weight"), "outpost_tool_mix_weight", 1, 10, 0)
+    local mixList = vgui.Create("DListView")
+    mixList:SetTall(130)
+    mixList:SetMultiSelect(false)
+    mixList:AddColumn(L("npc_type"))
+    mixList:AddColumn(L("weapon"))
+    mixList:AddColumn(L("mix_share")):SetFixedWidth(50)
+    pnl:AddItem(mixList)
+
+    local function ReadMix()
+        local t = {}
+        for part in string.gmatch(GetConVarString("outpost_tool_mix"), "[^;]+") do
+            local c, w, n = string.match(part, "^([^,]+),([^,]*),(%d+)$")
+            if c then t[#t + 1] = { c, w, tonumber(n) } end
+        end
+        return t
+    end
+    local function WriteMix(t)
+        local parts = {}
+        for _, e in ipairs(t) do parts[#parts + 1] = e[1] .. "," .. e[2] .. "," .. e[3] end
+        RunConsoleCommand("outpost_tool_mix", table.concat(parts, ";"))
+    end
+    local function NpcName(cls)
+        local d = list.Get("NPC")[cls]
+        return d and language.GetPhrase(d.Name or cls) or cls
+    end
+    local function RefreshMix()
+        if not IsValid(mixList) then return end
+        mixList:Clear()
+        local t = ReadMix()
+        local total = 0
+        for _, e in ipairs(t) do total = total + e[3] end
+        for i, e in ipairs(t) do
+            local wname = e[2] == "default" and L("weapon_default") or e[2] == "none" and L("weapon_none") or e[2]
+            local line = mixList:AddLine(NpcName(e[1]), wname, math.Round(e[3] / total * 100) .. "%")
+            line.OW_Index = i
+        end
+    end
+    RefreshMix()
+    cvars.AddChangeCallback("outpost_tool_mix", function() timer.Simple(0, RefreshMix) end, "OutpostWar_MixList")
+
+    -- двойной клик по строке — удалить её
+    mixList.DoDoubleClick = function(_, _, line)
+        local t = ReadMix()
+        table.remove(t, line.OW_Index)
+        WriteMix(t)
+    end
+
+    local add = pnl:Button(L("mix_add"))
+    add.DoClick = function()
+        local t = ReadMix()
+        if #t >= 8 then return end
+        t[#t + 1] = { GetConVarString("outpost_tool_npc"), GetConVarString("outpost_tool_weapon"),
+            math.Clamp(math.floor(GetConVarNumber("outpost_tool_mix_weight")), 1, 10) }
+        WriteMix(t)
+    end
+    local clear = pnl:Button(L("mix_clear"))
+    clear.DoClick = function() RunConsoleCommand("outpost_tool_mix", "") end
+    pnl:ControlHelp(L("mix_help"))
 
     pnl:NumSlider(L("max_npcs"), "outpost_tool_max_npcs", 1, 40, 0)
     pnl:NumSlider(L("squad_size"), "outpost_tool_squad_size", 1, 10, 0)

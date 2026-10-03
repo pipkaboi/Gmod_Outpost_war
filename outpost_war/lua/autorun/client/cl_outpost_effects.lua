@@ -35,6 +35,7 @@ hook.Add("PopulateToolMenu", "OutpostWar_Settings", function()
             pnl:CheckBox(L("break_glass"), "outpost_war_break_glass")
             pnl:CheckBox(L("debug"), "outpost_war_debug")
             pnl:Button(L("clear_npcs"), "outpost_war_clear_npcs")
+            pnl:Button(L("reset_defaults"), "outpost_war_reset_settings")
             pnl:Help(L("nodes_help"))
         end)
 end)
@@ -139,4 +140,49 @@ hook.Add("CreateClientsideRagdoll", "OutpostWar_Cleanup", function(ent, rag)
     timer.Simple(t, function()
         if IsValid(rag) then rag:SetRenderMode(RENDERMODE_TRANSCOLOR) rag:Remove() end
     end)
+end)
+
+---------------------------------------------------------------------------
+-- Звезда над игроком, вступившим в войну: крупнее лидерской, с сиянием,
+-- медленно вращается и пульсирует
+---------------------------------------------------------------------------
+local function DrawPlayerStar(ply)
+    local t = ply:GetNWInt("OW_Team", 0)
+    if t <= 0 or not ply:Alive() then return end
+    if ply == LocalPlayer() and not ply:ShouldDrawLocalPlayer() then return end
+    local col = OutpostWar.TeamColor(t)
+    local now = CurTime()
+    local pulse = 1 + math.sin(now * 3) * 0.08
+    local head = ply:GetPos() + Vector(0, 0, ply:OBBMaxs().z + 22 + math.sin(now * 2) * 2)
+    local ang = Angle(0, EyeAngles().y - 90, 90)
+    ang:RotateAroundAxis(ang:Forward(), 0)
+    cam.Start3D2D(head, ang, 0.25)
+        -- сияние
+        surface.SetDrawColor(col.r, col.g, col.b, 40)
+        draw.NoTexture()
+        for r = 70, 50, -10 do
+            local poly = {}
+            for i = 0, 23 do
+                local a = math.rad(i * 15)
+                poly[#poly + 1] = { x = math.cos(a) * r * pulse, y = math.sin(a) * r * pulse }
+            end
+            surface.DrawPoly(poly)
+        end
+        -- вращение звезды вокруг центра
+        local m = Matrix()
+        m:Rotate(Angle(0, now * 40 % 360, 0))
+        cam.PushModelMatrix(m, true)
+            DrawStar(52 * pulse, color_black)
+            DrawStar(44 * pulse, col)
+            DrawStar(20 * pulse, Color(255, 255, 255, 200))
+        cam.PopModelMatrix()
+    cam.End3D2D()
+end
+
+hook.Add("PostDrawTranslucentRenderables", "OutpostWar_PlayerStar", function(_, sky)
+    if sky then return end
+    local eye = EyePos()
+    for _, ply in ipairs(player.GetAll()) do
+        if IsValid(ply) and ply:GetPos():DistToSqr(eye) < 5000 * 5000 then DrawPlayerStar(ply) end
+    end
 end)
